@@ -392,7 +392,6 @@
     }
 
     // เริ่มต้นระบบแจ้งเตือน OneSignal
-    // เริ่มต้นระบบแจ้งเตือน OneSignal (ฉบับแก้ไขให้กดเปิดได้ทุกอุปกรณ์)
     window.OneSignalDeferred = window.OneSignalDeferred || [];
     OneSignalDeferred.push(async function(OneSignal) {
       await OneSignal.init({
@@ -428,7 +427,6 @@
       const btn = document.getElementById('btnEnableNoti');
       btn.innerText = '⏳ กำลังขอสิทธิ์...';
 
-      // 1. ตรวจสอบหากเปิดผ่านแอปบน iPhone (ต้องเพิ่มลงหน้าจอโฮมก่อนจึงจะแจ้งเตือนได้)
       const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
       const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
       if (isIOS && !isStandalone) {
@@ -437,7 +435,6 @@
         return;
       }
 
-      // 2. เรียกหน้าต่างขออนุญาตแจ้งเตือนของเบราว์เซอร์โดยตรง
       try {
         if ("Notification" in window) {
           const perm = await Notification.requestPermission();
@@ -456,7 +453,6 @@
           }
         }
 
-        // สำรอง: เรียกผ่าน OneSignal SDK
         OneSignalDeferred.push(async function(OneSignal) {
           await OneSignal.Notifications.requestPermission();
           const ok = OneSignal.Notifications.permission;
@@ -469,7 +465,6 @@
       }
     }
 
-    // ผูกสิทธิ์แผนก/กะ ของผู้ใช้งานเข้ากับเครื่องมือถือ (เพื่อส่งแจ้งเตือนให้ตรงแผนก)
     function bindUserTagsToOneSignal(user) {
       OneSignalDeferred.push(async function(OneSignal) {
         try {
@@ -487,7 +482,6 @@
       });
     }
 
-    // ล้างตัวเลข Badge สีแดงบนไอคอนแอปเมื่อเปิดแอปขึ้นมาดู
     if ('clearAppBadge' in navigator) {
       navigator.clearAppBadge().catch(() => {});
     }
@@ -574,12 +568,12 @@
           shift: shift
         });
         selectEl.disabled = false;
-        if (res.success) {
+        if (res && res.success) {
           if (typeCellId && document.getElementById(typeCellId)) {
             document.getElementById(typeCellId).innerText = res.newType;
           }
         } else {
-          alert(res.message);
+          alert(res ? res.message : 'เปลี่ยนชื่อพนักงานไม่สำเร็จ');
         }
       } catch (err) {
         selectEl.disabled = false;
@@ -651,12 +645,12 @@
         });
         btn.disabled = false;
         btn.innerText = 'บันทึกรหัสผ่านใหม่';
-        if (res.success) {
+        if (res && res.success) {
           closeChangePassModal();
           alert(res.message);
         } else {
           msgBox.style.display = 'block';
-          msgBox.innerText = res.message;
+          msgBox.innerText = res ? res.message : 'เปลี่ยนรหัสผ่านไม่สำเร็จ';
         }
       } catch (err) {
         btn.disabled = false;
@@ -691,14 +685,13 @@
         btn.disabled = false;
         btn.innerText = 'เข้าสู่ระบบ';
 
-        if (res.success) {
+        if (res && res.success) {
           currentUser = res;
           localStorage.setItem('spareAppUser', JSON.stringify(res));
           initMainAppAfterLogin();
-          requestPushPermission();
         } else {
           errBox.style.display = 'block';
-          errBox.innerText = res.message;
+          errBox.innerText = res ? res.message : 'เข้าสู่ระบบไม่สำเร็จ';
         }
       } catch (err) {
         btn.disabled = false;
@@ -823,7 +816,7 @@
           shiftView: currentShiftView
         });
 
-        let reasonPills = Object.keys(res.reasonTotals)
+        let reasonPills = Object.keys(res.reasonTotals || {})
           .filter(r => res.reasonTotals[r] > 0)
           .map(r => `<span class="stat-pill" style="background:#fefcbf; color:#744210;">${r}: ${res.reasonTotals[r]}</span>`)
           .join('');
@@ -831,16 +824,16 @@
         document.getElementById('repGrandBanner').innerHTML = `
           <div style="width:100%; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
             <span style="font-weight:bold; color:#22543d;">สรุปยอด (${mode === 'DAILY' ? 'รายวัน' : 'รายเดือน'}):</span>
-            <span class="stat-pill" style="background:#bee3f8; color:#2b6cb0;">แผนกผลิตขอทดแทน: ${res.grandTotalWorker} คน</span>
+            <span class="stat-pill" style="background:#bee3f8; color:#2b6cb0;">แผนกผลิตขอทดแทน: ${res.grandTotalWorker || 0} คน</span>
             <span class="stat-pill" style="background:#e9d8fd; color:#553c9a;">Spare หยุดงาน (ME): ${res.grandTotalMeAbsent || 0} คน</span>
           </div>
           ${reasonPills ? `<div style="width:100%; display:flex; gap:6px; flex-wrap:wrap; margin-top:6px; padding-top:6px; border-top:1px dashed #cbd5e0;">${reasonPills}</div>` : ''}
         `;
 
         const tbody = document.getElementById('repTableBody');
-        let html = res.rows.map(r => {
+        let html = (res.rows || []).map(r => {
           const rowStyle = r.w === 0 ? 'color:#a0aec0;' : 'background:#ffffff;';
-          const reasonSummary = Object.keys(r.reasons)
+          const reasonSummary = Object.keys(r.reasons || {})
             .filter(k => r.reasons[k] > 0)
             .map(k => `${k} (${r.reasons[k]})`)
             .join(', ') || '-';
@@ -861,7 +854,7 @@
         html += `
           <tr class="total-row">
             <td colspan="2" style="text-align:right;">รวมยอดแผนกผลิตขอทดแทน :</td>
-            <td class="num-col" style="background:#bee3f8; color:#1a365d;">${res.grandTotalWorker}</td>
+            <td class="num-col" style="background:#bee3f8; color:#1a365d;">${res.grandTotalWorker || 0}</td>
             <td>-</td>
           </tr>
         `;
@@ -1319,6 +1312,13 @@
           shift: shift
         });
         btn.disabled = false;
+
+        if (!res || !res.success || !res.summary) {
+          renderBadges();
+          alert('ประมวลผลไม่สำเร็จ: ' + (res && res.message ? res.message : 'ยังไม่ได้ Deploy เวอร์ชันใหม่ใน Google Apps Script'));
+          return;
+        }
+
         loadShiftStatus();
         
         const box = document.getElementById('summaryBox');
@@ -1392,11 +1392,11 @@
 
         document.getElementById('histStatsBanner').innerHTML = `
           <span style="font-weight:bold; color:#22543d; align-self:center;">ยอดรวมตามตัวกรอง:</span>
-          <span class="stat-pill" style="background:#bee3f8; color:#2b6cb0;">Worker: ${res.totalWorker} คน</span>
+          <span class="stat-pill" style="background:#bee3f8; color:#2b6cb0;">Worker: ${res.totalWorker || 0} คน</span>
         `;
 
         const subBody = document.getElementById('histSubBody');
-        if (res.submissionLogs.length === 0) {
+        if (!res.submissionLogs || res.submissionLogs.length === 0) {
           subBody.innerHTML = '<tr><td colspan="6" style="text-align:center; color:#718096;">ไม่พบประวัติข้อมูลตามเงื่อนไขที่เลือก</td></tr>';
         } else {
           subBody.innerHTML = res.submissionLogs.map(r => {
@@ -1421,7 +1421,7 @@
         const canEditSpare = canRunAllocation();
         const spareList = res.spareList || appState.spareList || [];
 
-        if (res.allocationLogs.length === 0) {
+        if (!res.allocationLogs || res.allocationLogs.length === 0) {
           allocBody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:#718096;">ยังไม่มีประวัติการประมวลผลจัดสรร Spare ตามเงื่อนไขที่เลือก</td></tr>';
         } else {
           allocBody.innerHTML = res.allocationLogs.map((a, idx) => {
