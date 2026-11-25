@@ -9,16 +9,8 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/512/3135/3135715.png">
-  <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
-<script>
-  window.OneSignalDeferred = window.OneSignalDeferred || [];
-  OneSignalDeferred.push(async function(OneSignal) {
-    await OneSignal.init({
-      appId: "49a40e61-f6da-49eb-9464-77cefbe099e1",
-    });
-  });
-</script>
-  <!-- OneSignal Web SDK v16 -->
+
+  <!-- OneSignal Web SDK v16 (โหลดเพียงครั้งเดียว) -->
   <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
 
   <style>
@@ -383,7 +375,6 @@
     const GAS_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbyVaI0G6Hb9Er8op0ES_hzVRWW7NZGrmGzd_MeT6RGWAMli9yuQnhnrLd_Vyjb1uAo85g/exec";
     const ONESIGNAL_APP_ID = "49a40e61-f6da-49eb-9464-77cefbe099e1";
 
-    // ฟังก์ชันกลางสำหรับยิง API ไปยัง Google Apps Script
     async function callGasApi(payloadObj) {
       if (!GAS_WEB_APP_URL || GAS_WEB_APP_URL.indexOf('ใส่_') !== -1) {
         throw new Error('กรุณาใส่ GAS_WEB_APP_URL ในไฟล์ index.html ก่อนใช้งาน');
@@ -399,17 +390,22 @@
       return await response.json();
     }
 
-    // เริ่มต้นระบบแจ้งเตือน OneSignal
+    // เริ่มต้นระบบแจ้งเตือน OneSignal (จุดเดียว ไม่ซ้ำซ้อน)
     window.OneSignalDeferred = window.OneSignalDeferred || [];
     OneSignalDeferred.push(async function(OneSignal) {
       await OneSignal.init({
         appId: ONESIGNAL_APP_ID,
-        serviceWorkerPath: "./sw.js",
+        serviceWorkerParam: { scope: "/spare-alert/" },
+        serviceWorkerPath: "spare-alert/sw.js",
         notifyButton: { enable: false }
       });
 
       const isPermitted = (Notification.permission === "granted") || OneSignal.Notifications.permission;
       updateNotiButtonState(isPermitted);
+
+      if (isPermitted && currentUser) {
+        bindUserTagsToOneSignal(currentUser);
+      }
 
       OneSignal.Notifications.addEventListener("permissionChange", function(permission) {
         updateNotiButtonState(permission);
