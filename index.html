@@ -1,1524 +1,934 @@
-<!DOCTYPE html>
-<html lang="th">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>ระบบขอพนักงาน Spare ทดแทน (Request Spare)</title>
-  <link rel="manifest" href="./manifest.json">
-  <meta name="theme-color" content="#2b6cb0">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/512/3135/3135715.png">
+const ALL_DEPARTMENTS = [
+  "PC-INJ", "H/C", "Bodon", "EXT-INJ", "EXT-ALU", 
+  "Painting", "BMC-INJ", "BMC-ALU", "ME - PARTS"
+];
 
-  <!-- OneSignal Web SDK v16 -->
-  <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
+// ตั้งค่า OneSignal (หากยังไม่ได้ใส่ REST API Key ระบบจะข้ามการส่งแจ้งเตือนโดยไม่ทำให้ระบบหลักค้าง)
+const ONESIGNAL_APP_ID = "49a40e61-f6da-49eb-9464-77cefbe099e1";
+const ONESIGNAL_REST_API_KEY = ""; // ใส่ REST API Key ของ OneSignal ที่นี่ (ถ้ามี)
 
-  <style>
-    body { font-family: 'Sarabun', Arial, sans-serif; background: #f0f4f8; padding: 14px; color: #1a202c; margin: 0; }
-    .container { max-width: 900px; margin: auto; background: #fff; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); }
+function doGet(e) {
+  return ContentService.createTextOutput(JSON.stringify({ status: "OK", message: "Spare Alert API is running" }))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+// รับคำสั่งทั้งหมดจากหน้าเว็บ GitHub Pages (index.html)
+function doPost(e) {
+  try {
+    const raw = e && e.postData && e.postData.contents ? e.postData.contents : '{}';
+    const req = JSON.parse(raw);
+    const action = req.action;
+    let result = {};
+
+    if (action === 'verifyUserLogin') {
+      result = verifyUserLogin(req.username, req.password);
+    } else if (action === 'changeUserPassword') {
+      result = changeUserPassword(req.username, req.oldPassword, req.newPassword);
+    } else if (action === 'getFormAndStatus') {
+      result = getFormAndStatus(req.date, req.shift);
+    } else if (action === 'saveDepartmentData') {
+      result = saveDepartmentData(req.payload);
+    } else if (action === 'runFullAllocation') {
+      result = runFullAllocation(req.date, req.shift, false);
+    } else if (action === 'updateAllocatedSpare') {
+      result = updateAllocatedSpare(req.rowIndex, req.newSpareName, req.editorName, req.dept, req.shift);
+    } else if (action === 'getHistoryData') {
+      result = getHistoryData(req.filterDate, req.filterShift, req.filterDept);
+    } else if (action === 'getSummaryReport') {
+      result = getSummaryReport(req.mode, req.periodVal, req.shiftView);
+    } else {
+      result = { success: false, message: 'ไม่พบคำสั่ง action: ' + action };
+    }
+
+    return ContentService.createTextOutput(JSON.stringify(result))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({ success: false, message: 'Server Error: ' + err.message }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+function normalizeDate(val) {
+  if (!val) return '';
+  if (val instanceof Date) {
+    return Utilities.formatDate(val, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  }
+  const str = val.toString().trim().replace(/^'/, '');
+  if (/^\d{2}\/\d{2}\/\d{4}$/.test(str)) {
+    const parts = str.split('/');
+    return `${parts[2]}-${parts[1]}-${parts[0]}`;
+  }
+  return str.substring(0, 10);
+}
+
+// ตรวจสอบการ Login จากแท็บ "User" (A: Username, B: Password, C: Name, D: Role, E: Line, F: Shift)
+function verifyUserLogin(username, password) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const userSheet = ss.getSheetByName('User') || ss.getSheetByName('Users');
     
-    .login-box { max-width: 400px; margin: 40px auto; background: #fff; padding: 28px; border-radius: 12px; box-shadow: 0 6px 20px rgba(0,0,0,0.1); border-top: 5px solid #2b6cb0; }
-    .login-title { text-align: center; color: #1a365d; margin-top: 0; margin-bottom: 6px; font-size: 20px; }
-    .login-sub { text-align: center; color: #718096; font-size: 13px; margin-bottom: 20px; }
-    .login-error { background: #fff5f5; color: #c53030; border: 1px solid #feb2b2; padding: 8px 12px; border-radius: 6px; font-size: 13px; margin-top: 12px; display: none; text-align: center; }
-
-    .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; justify-content: center; align-items: center; }
-    .modal-card { background: #fff; width: 90%; max-width: 380px; padding: 24px; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); border-top: 5px solid #d69e2e; }
-    .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px; }
-    .modal-close { background: none; border: none; font-size: 20px; cursor: pointer; color: #718096; }
-
-    .user-topbar { display: flex; justify-content: space-between; align-items: center; background: #edf2f7; padding: 8px 14px; border-radius: 8px; margin-bottom: 14px; font-size: 13px; flex-wrap: wrap; gap: 8px; }
-    .topbar-actions { display: flex; gap: 6px; flex-wrap: wrap; }
-    .btn-noti { background: #3182ce; color: #fff; border: none; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: bold; }
-    .btn-noti.enabled { background: #38a169; }
-    .btn-change-pass { background: #d69e2e; color: #fff; border: none; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: bold; }
-    .btn-logout { background: #e53e3e; color: #fff; border: none; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: bold; }
-
-    h2 { color: #1a365d; margin-top: 0; margin-bottom: 16px; text-align: center; font-size: 20px; }
-
-    .nav-tabs { display: flex; gap: 6px; background: #e2e8f0; padding: 6px; border-radius: 10px; margin-bottom: 18px; }
-    .nav-tab { flex: 1; padding: 11px 8px; border: none; border-radius: 8px; font-size: 14px; font-weight: bold; cursor: pointer; background: transparent; color: #4a5568; transition: 0.2s; text-align: center; }
-    .nav-tab.active-A { background: #2b6cb0; color: #fff; box-shadow: 0 2px 6px rgba(43,108,176,0.3); }
-    .nav-tab.active-B { background: #6b46c1; color: #fff; box-shadow: 0 2px 6px rgba(107,70,193,0.3); }
-    .nav-tab.active-HISTORY { background: #2f855a; color: #fff; box-shadow: 0 2px 6px rgba(47,133,90,0.3); }
-
-    .sub-nav-tabs { display: flex; gap: 8px; border-bottom: 2px solid #cbd5e0; padding-bottom: 10px; margin-bottom: 16px; flex-wrap: wrap; }
-    .sub-tab { padding: 8px 14px; border: 1px solid #cbd5e0; border-radius: 20px; font-size: 13px; font-weight: bold; cursor: pointer; background: #f8fafc; color: #4a5568; }
-    .sub-tab.active-sub { background: #2f855a; color: #fff; border-color: #2f855a; }
-
-    .view-toggle-group { display: inline-flex; background: #edf2f7; padding: 4px; border-radius: 8px; border: 1px solid #cbd5e0; }
-    .view-toggle-btn { padding: 7px 12px; border: none; border-radius: 6px; font-size: 13px; font-weight: bold; cursor: pointer; background: transparent; color: #4a5568; }
-    .view-toggle-btn.active-view { background: #2b6cb0; color: #fff; }
-
-    .status-panel { background: #f8fafc; border: 1px solid #cbd5e0; border-radius: 8px; padding: 14px; margin-top: 14px; margin-bottom: 18px; }
-    .status-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; font-weight: bold; font-size: 14px; flex-wrap: wrap; gap: 6px; }
-    .badge-grid { display: flex; flex-wrap: wrap; gap: 8px; }
-    .dept-badge { padding: 7px 13px; border-radius: 20px; font-size: 13px; font-weight: bold; cursor: pointer; border: 1px solid transparent; }
-    .badge-done { background: #c6f6d5; color: #22543d; border-color: #9ae6b4; }
-    .badge-late { background: #feebc8; color: #9c4221; border-color: #fbd38d; }
-    .badge-me { background: #e9d8fd; color: #553c9a; border-color: #d6bcfa; }
-    .badge-pending { background: #edf2f7; color: #4a5568; border-color: #cbd5e0; }
-    .badge-active { box-shadow: 0 0 0 2.5px #2b6cb0; }
-    .badge-locked { opacity: 0.4; cursor: not-allowed !important; }
-
-    .current-dept-banner { background: #2d3748; color: #fff; padding: 10px 16px; border-radius: 8px; font-size: 15px; font-weight: bold; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px; }
-
-    label { display: block; margin-top: 12px; font-weight: bold; font-size: 14px; }
-    input[type="text"], input[type="password"], input[type="date"], input[type="month"], input[type="number"], select { width: 100%; padding: 10px; margin-top: 5px; border: 1px solid #cbd5e0; border-radius: 6px; box-sizing: border-box; font-size: 14px; background: #fff; }
-    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
-    .col { flex: 1; min-width: 140px; }
-
-    .level-card { border: 1px solid #cbd5e0; border-radius: 8px; padding: 15px; margin-top: 14px; background: #ffffff; }
-    .level-card-title { font-weight: bold; font-size: 15px; color: #2b6cb0; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px; margin-bottom: 10px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px; }
-
-    .person-box { background: #f8fafc; border: 1px solid #cbd5e0; padding: 10px 14px; border-radius: 6px; margin-top: 8px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-    .person-label { font-weight: bold; color: #2b6cb0; min-width: 65px; }
-    .person-pos-select { flex: 1.3; min-width: 150px; margin-top: 0 !important; }
-    .person-reason-select { flex: 1; min-width: 140px; margin-top: 0 !important; border-color: #90cdf4 !important; background: #f0f9ff !important; }
-
-    .spare-checkbox-list { background: #faf5ff; border: 1px solid #d6bcfa; padding: 12px; border-radius: 6px; margin-top: 6px; }
-    .spare-check-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px dashed #e9d8fd; flex-wrap: wrap; }
-    .spare-left { display: flex; align-items: center; gap: 10px; }
-    .spare-left input[type="checkbox"] { width: 18px; height: 18px; cursor: pointer; }
-    .spare-reason-select { width: 170px !important; margin-top: 0 !important; padding: 6px !important; font-size: 13px !important; }
-
-    .action-btn-row { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
-    .btn-save { flex: 2; min-width: 200px; padding: 14px; background: #2b6cb0; color: white; border: none; border-radius: 6px; font-size: 15px; font-weight: bold; cursor: pointer; }
-    .btn-save:hover { background: #1e4e8c; }
-    .btn-saved-green { background: #38a169 !important; box-shadow: 0 2px 6px rgba(56,161,105,0.3); }
-    .btn-cancel-req { flex: 1; min-width: 160px; padding: 14px; background: #e53e3e; color: white; border: none; border-radius: 6px; font-size: 14px; font-weight: bold; cursor: pointer; }
-
-    .btn-unlock-edit { margin-top: 16px; width: 100%; padding: 14px; background: #dd6b20; color: white; border: none; border-radius: 6px; font-size: 15px; font-weight: bold; cursor: pointer; box-shadow: 0 2px 6px rgba(221,107,32,0.3); }
-    .btn-process { margin-top: 14px; width: 100%; padding: 14px; background: #2b6cb0; color: white; border: none; border-radius: 6px; font-size: 16px; font-weight: bold; cursor: pointer; }
-    .no-process-notice { margin-top: 14px; padding: 14px; background: #edf2f7; border: 1px solid #cbd5e0; border-radius: 6px; text-align: center; color: #4a5568; font-size: 13px; }
-
-    .summary-box { margin-top: 18px; padding: 16px; background: #f0fff4; border: 1px solid #9ae6b4; border-left: 5px solid #38a169; border-radius: 8px; display: none; overflow-x: auto; }
-    .stat-banner { display: flex; gap: 8px; flex-wrap: wrap; background: #fff; padding: 12px; border-radius: 8px; border: 1px solid #cbd5e0; margin: 12px 0; font-size: 13px; }
-    .stat-pill { background: #edf2f7; padding: 4px 10px; border-radius: 14px; font-weight: bold; }
-    
-    .spare-swap-select { width: auto !important; min-width: 165px; margin-top: 0 !important; padding: 5px 8px !important; font-size: 13px !important; font-weight: bold; color: #2b6cb0; border: 1px solid #90cdf4 !important; background: #ebf8ff !important; border-radius: 6px; cursor: pointer; }
-
-    table { width: 100%; border-collapse: collapse; margin-top: 10px; background: #fff; font-size: 13px; }
-    th, td { border: 1px solid #cbd5e0; padding: 7px 8px; text-align: left; }
-    th { background: #edf2f7; color: #2d3748; }
-    .num-col { text-align: center !important; }
-    .total-row { background: #edf2f7 !important; font-weight: bold; }
-    .tag-ontime { color: #22543d; background: #c6f6d5; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: bold; }
-    .tag-late { color: #9c4221; background: #feebc8; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: bold; }
-    .tag-me { color: #553c9a; background: #e9d8fd; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: bold; }
-    .section-divider { margin: 20px 0 10px 0; font-size: 15px; font-weight: bold; color: #1a365d; border-left: 4px solid #2b6cb0; padding-left: 10px; }
-  </style>
-</head>
-<body>
-
-  <!-- หน้าจอ Login -->
-  <div id="loginScreen" class="login-box">
-    <h3 class="login-title">🔐 ลงชื่อเข้าใช้งานระบบ</h3>
-    <div class="login-sub">ระบบขอพนักงาน Spare ทดแทน (Request Spare)</div>
-    <label style="margin-top:0;">ชื่อผู้ใช้งาน (Username):</label>
-    <input type="text" id="loginUser" placeholder="เช่น PC01, HC01, ME01, Admin" onkeypress="if(event.key==='Enter') handleLogin()">
-    <label>รหัสผ่าน (Password):</label>
-    <input type="password" id="loginPass" placeholder="กรอกรหัสผ่าน" onkeypress="if(event.key==='Enter') handleLogin()">
-    <div id="loginError" class="login-error"></div>
-    <button id="btnLogin" class="btn-save" style="margin-top:20px; width:100%;" onclick="handleLogin()">เข้าสู่ระบบ</button>
-  </div>
-
-  <!-- หน้าต่าง Modal เปลี่ยนรหัสผ่าน -->
-  <div id="changePassModal" class="modal-overlay">
-    <div class="modal-card">
-      <div class="modal-header">
-        <h4 style="margin:0; color:#1a365d;">🔑 เปลี่ยนรหัสผ่านส่วนตัว</h4>
-        <button class="modal-close" onclick="closeChangePassModal()">&times;</button>
-      </div>
-      <div style="font-size:13px; color:#4a5568; margin-bottom:10px;">
-        บัญชีผู้ใช้งาน: <b id="modalUsernameText" style="color:#2b6cb0;">-</b>
-      </div>
-      <label style="margin-top:6px;">รหัสผ่านเดิม (Old Password):</label>
-      <input type="password" id="oldPassInput" placeholder="กรอกรหัสผ่านปัจจุบัน">
-      <label>รหัสผ่านใหม่ (New Password):</label>
-      <input type="password" id="newPassInput" placeholder="ตั้งรหัสผ่านใหม่ (อย่างน้อย 4 ตัว)">
-      <label>ยืนยันรหัสผ่านใหม่ (Confirm Password):</label>
-      <input type="password" id="confirmPassInput" placeholder="กรอกรหัสผ่านใหม่อีกครั้ง">
-      <div id="changePassMsg" class="login-error"></div>
-      <div style="display:flex; gap:8px; margin-top:18px;">
-        <button id="btnConfirmChangePass" class="btn-save" style="margin-top:0; background:#38a169;" onclick="submitChangePassword()">บันทึกรหัสผ่านใหม่</button>
-        <button class="btn-save" style="margin-top:0; background:#718096;" onclick="closeChangePassModal()">ยกเลิก</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- หน้าจอหลัก -->
-  <div id="mainAppContainer" class="container" style="display:none;">
-    <div class="user-topbar">
-      <span>
-        👤 ผู้ใช้งาน: <b id="loggedUserDisplay" style="color:#2b6cb0;">-</b> | 
-        แผนก: <b id="loggedLineDisplay" style="color:#2f855a;">-</b> | 
-        กะ: <b id="loggedShiftDisplay" style="color:#6b46c1;">-</b>
-      </span>
-      <div class="topbar-actions">
-        <button id="btnEnableNoti" class="btn-noti" onclick="requestPushPermission()">🔔 เปิดแจ้งเตือนมือถือ</button>
-        <button class="btn-change-pass" onclick="openChangePassModal()">🔑 เปลี่ยนรหัสผ่าน</button>
-        <button class="btn-logout" onclick="handleLogout()">ออกจากระบบ</button>
-      </div>
-    </div>
-
-    <h2>ระบบขอพนักงาน Spare ทดแทน (Request Spare)</h2>
-
-    <div class="nav-tabs">
-      <button id="tabA" class="nav-tab active-A" onclick="switchPage('A')">📋 ขอคน กะ A</button>
-      <button id="tabB" class="nav-tab" onclick="switchPage('B')">📋 ขอคน กะ B</button>
-      <button id="tabHistory" class="nav-tab" onclick="switchPage('HISTORY')">📊 ประวัติคำขอ & สรุปผล</button>
-    </div>
-
-    <!-- หน้า 1 & 2: ฟอร์มขอคนทดแทน -->
-    <div id="shiftFormPage">
-      <div class="row">
-        <div class="col">
-          <label style="margin-top:0;">วันที่ปฏิบัติงาน:</label>
-          <input type="date" id="date" onchange="loadShiftStatus()">
-        </div>
-      </div>
-
-      <div class="status-panel">
-        <div class="status-header">
-          <span>เลือกแผนกเพื่อขอคนทดแทน (ส่วน ME - PARTS ลงเฉพาะ Spare ที่หยุดงาน):</span>
-          <span id="progressText" style="color:#2b6cb0;">ขอคนแล้ว 0 แผนก</span>
-        </div>
-        <div id="deptBadges" class="badge-grid">กำลังโหลด...</div>
-      </div>
-
-      <div class="current-dept-banner">
-        <span>แผนกที่เลือก: <span id="currentDeptTitle">PC-INJ</span></span>
-        <span id="editTag" style="display:none; background:#38a169; font-size:12px; padding:3px 10px; border-radius:12px;">✓ บันทึกแล้ว</span>
-      </div>
-
-      <button id="btnUnlockEdit" class="btn-unlock-edit" style="display:none;" onclick="unlockEditForm()">
-        ✏️ แก้ไข / ยกเลิกข้อมูลแผนก PC-INJ
-      </button>
-
-      <div id="formInputBlock">
-        <div class="level-card">
-          <div class="level-card-title">
-            <span id="levelCardMainTitle">ขอพนักงาน Spare ทดแทน (ระดับ Worker)</span>
-            <span id="levelCardSubTitle" style="font-size:12px; font-weight:normal; color:#718096;">*บันทึกเฉพาะวันที่มีคนขาด</span>
-          </div>
-
-          <div id="mePartsSection" style="display:none;">
-            <label style="color:#553c9a; margin-top:0;">เลือกรายชื่อพนักงาน Spare ที่ขาด - ลา (เพื่อตัดออกจากรายชื่อจัดสรรให้แผนกอื่น):</label>
-            <div id="spareCheckboxContainer" class="spare-checkbox-list"></div>
-          </div>
-
-          <div id="normalDeptSection">
-            <label style="margin-top:0;">จำนวน Worker ที่ขอทดแทน (คน):</label>
-            <input type="number" id="workerCount" min="0" max="20" value="0" oninput="generatePersonRows()">
-            <div id="peoplePositionsContainer"></div>
-          </div>
-        </div>
-
-        <div class="action-btn-row">
-          <button id="btnSave" class="btn-save" onclick="saveCurrentDept()">ส่งคำขอ Spare แผนก PC-INJ</button>
-          <button id="btnCancelReq" class="btn-cancel-req" style="display:none;" onclick="cancelCurrentDeptRequest()">🗑️ ยกเลิกคำขอ (ไม่มีคนขาด)</button>
-        </div>
-      </div>
-
-      <hr style="margin:22px 0; border:none; border-top:1px solid #cbd5e0;">
-
-      <!-- ปุ่มประมวลผลจัดสรร Spare (แสดงเฉพาะ Admin และแผนก ME) -->
-      <button id="btnProcess" class="btn-process" onclick="processAllAllocations()" style="display:none;">
-        ประมวลผลจัดสรร Spare และบันทึกสรุป
-      </button>
-      <div id="summaryBox" class="summary-box"></div>
-
-      <!-- ส่วนแสดงผลสำหรับผู้ขอคน (หัวหน้าแผนก) -->
-      <div id="noProcessNotice" class="no-process-notice" style="display:none;">
-        <div>ℹ️ ระบบจะประมวลผลจัดสรร Spare อัตโนมัติตามรอบเวลาตัดรอบ (หรือดำเนินการโดยแผนก ME / Admin)</div>
-        <button id="btnCheckAllocWait" onclick="refreshRequesterAllocation(this)" style="margin-top:10px; padding:8px 16px; background:#2b6cb0; color:#fff; border:none; border-radius:6px; cursor:pointer; font-weight:bold; font-size:13px;">
-          🔄 เช็กผลการจัดสรร Spare ล่าสุด
-        </button>
-      </div>
-      <div id="requesterResultBox" class="summary-box" style="display:none; background:#ebf8ff; border-color:#90cdf4; border-left-color:#2b6cb0;"></div>
-    </div>
-
-    <!-- หน้า 3: ประวัติคำขอ & สรุปผล -->
-    <div id="historyPage" style="display:none;">
-      <div class="sub-nav-tabs">
-        <button id="subTabDaily" class="sub-tab active-sub" onclick="switchHistorySubTab('DAILY')">📅 สรุปการขอคนรายวัน</button>
-        <button id="subTabMonthly" class="sub-tab" onclick="switchHistorySubTab('MONTHLY')">📆 สรุปการขอคนรายเดือน</button>
-        <button id="subTabDetail" class="sub-tab" onclick="switchHistorySubTab('DETAIL')">📑 รายละเอียด & ผลจัดสรร Spare</button>
-      </div>
-
-      <div id="summaryReportView">
-        <div style="background:#f0fff4; border:1px solid #9ae6b4; padding:14px; border-radius:8px;">
-          <div class="row">
-            <div class="col" id="dailyPickerCol">
-              <label style="margin-top:0;">เลือกวันที่ต้องการดูสรุป:</label>
-              <input type="date" id="repDate" onchange="loadSummaryReport()">
-            </div>
-            <div class="col" id="monthlyPickerCol" style="display:none;">
-              <label style="margin-top:0;">เลือกเดือนต้องการดูสรุป:</label>
-              <input type="month" id="repMonth" onchange="loadSummaryReport()">
-            </div>
-            <div class="col">
-              <label style="margin-top:0;">รูปแบบการแสดงผลกะ (แยกแผนก):</label>
-              <div class="view-toggle-group">
-                <button id="btnViewSeparate" class="view-toggle-btn active-view" onclick="setShiftView('SEPARATE')">แยกกะ (กะ A / กะ B)</button>
-                <button id="btnViewCombined" class="view-toggle-btn" onclick="setShiftView('COMBINED')">รวมกะ (A + B)</button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div id="repGrandBanner" class="stat-banner">กำลังโหลดสรุป...</div>
-
-        <div style="overflow-x:auto;">
-          <table>
-            <thead>
-              <tr>
-                <th>แผนก</th>
-                <th>กะ</th>
-                <th class="num-col" style="background:#e2e8f0;">จำนวน Worker (คน)</th>
-                <th>สรุปแยกตามเหตุผลการหยุดงาน</th>
-              </tr>
-            </thead>
-            <tbody id="repTableBody">
-              <tr><td colspan="4" style="text-align:center;">กำลังประมวลผลตารางสรุป...</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <div id="detailHistoryView" style="display:none;">
-        <div style="background:#f8fafc; border:1px solid #cbd5e0; padding:14px; border-radius:8px;">
-          <div class="row">
-            <div class="col">
-              <label style="margin-top:0;">กรองตามวันที่ (เว้นว่างเพื่อดูทั้งหมด):</label>
-              <input type="date" id="histDate" onchange="loadDetailHistory()">
-            </div>
-            <div class="col">
-              <label style="margin-top:0;">กรองตามกะ:</label>
-              <select id="histShift" onchange="loadDetailHistory()">
-                <option value="ALL">ทุกกะ (A และ B)</option>
-                <option value="A">เฉพาะ กะ A</option>
-                <option value="B">เฉพาะ กะ B</option>
-              </select>
-            </div>
-            <div class="col">
-              <label style="margin-top:0;">กรองตามแผนก:</label>
-              <select id="histDept" onchange="loadDetailHistory()">
-                <option value="ALL">ทุกแผนก (9 แผนก)</option>
-                <option value="PC-INJ">PC-INJ</option>
-                <option value="H/C">H/C</option>
-                <option value="Bodon">Bodon</option>
-                <option value="EXT-INJ">EXT-INJ</option>
-                <option value="EXT-ALU">EXT-ALU</option>
-                <option value="Painting">Painting</option>
-                <option value="BMC-INJ">BMC-INJ</option>
-                <option value="BMC-ALU">BMC-ALU</option>
-                <option value="ME - PARTS">ME - PARTS</option>
-              </select>
-            </div>
-          </div>
-          <div style="margin-top:10px; display:flex; gap:8px;">
-            <button onclick="loadDetailHistory()" style="padding:8px 16px; background:#2f855a; color:#fff; border:none; border-radius:6px; cursor:pointer; font-weight:bold;">🔄 รีเฟรชข้อมูล</button>
-            <button onclick="clearDateFilter()" style="padding:8px 16px; background:#718096; color:#fff; border:none; border-radius:6px; cursor:pointer;">ดูประวัติทุกวัน</button>
-          </div>
-        </div>
-
-        <div id="histStatsBanner" class="stat-banner">กำลังโหลดสถิติ...</div>
-
-        <div class="section-divider">1. รายละเอียดคำขอพนักงาน Spare และรายชื่อ Spare หยุดงาน (ME)</div>
-        <div style="overflow-x:auto;">
-          <table>
-            <thead>
-              <tr>
-                <th>วันที่</th>
-                <th>กะ</th>
-                <th>แผนก</th>
-                <th class="num-col">จำนวน (คน)</th>
-                <th>ตำแหน่ง / รายชื่อ Spare หยุด (เหตุผล)</th>
-                <th>ผู้บันทึก / เวลา</th>
-              </tr>
-            </thead>
-            <tbody id="histSubBody">
-              <tr><td colspan="6" style="text-align:center;">กำลังโหลดข้อมูล...</td></tr>
-            </tbody>
-          </table>
-        </div>
-
-        <div class="section-divider" style="border-left-color:#38a169;">2. รายละเอียดผลการจัดสรร Spare ลงทดแทน (ME / Admin สามารถเปลี่ยนชื่อพนักงานได้)</div>
-        <div style="overflow-x:auto;">
-          <table>
-            <thead>
-              <tr>
-                <th>วันที่</th>
-                <th>กะ</th>
-                <th>แผนกที่ขอ</th>
-                <th>ตำแหน่ง (เหตุผล)</th>
-                <th>Spare ที่ได้รับจัดสรร</th>
-                <th>เงื่อนไขการจัดสรร</th>
-                <th>สถานะส่ง</th>
-              </tr>
-            </thead>
-            <tbody id="histAllocBody">
-              <tr><td colspan="7" style="text-align:center;">กำลังโหลดข้อมูล...</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <script>
-    // =========================================================================
-    // ตั้งค่า URL ของ Google Apps Script Web App และ OneSignal App ID
-    // =========================================================================
-    const GAS_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbyVaI0G6Hb9Er8op0ES_hzVRWW7NZGrmGzd_MeT6RGWAMli9yuQnhnrLd_Vyjb1uAo85g/exec";
-    const ONESIGNAL_APP_ID = "49a40e61-f6da-49eb-9464-77cefbe099e1";
-
-    async function callGasApi(payloadObj) {
-      if (!GAS_WEB_APP_URL || GAS_WEB_APP_URL.indexOf('ใส่_') !== -1) {
-        throw new Error('กรุณาใส่ GAS_WEB_APP_URL ในไฟล์ index.html ก่อนใช้งาน');
-      }
-      const response = await fetch(GAS_WEB_APP_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify(payloadObj)
-      });
-      if (!response.ok) {
-        throw new Error('ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ Google Apps Script ได้');
-      }
-      return await response.json();
+    if (!userSheet) {
+      return { success: false, message: 'ไม่พบแท็บชื่อ "User" ใน Google Sheets' };
     }
 
-    // =========================================================================
-    // ระบบแจ้งเตือน OneSignal Web SDK v16 (ตั้งค่าสำหรับ GitHub Pages /spare-alert/)
-    // =========================================================================
-    let oneSignalReady = false;
-    let oneSignalInitError = null;
+    const data = userSheet.getDataRange().getDisplayValues();
+    const inputUser = (username || '').toString().trim().toLowerCase();
+    const inputPass = (password || '').toString().trim();
 
-    window.OneSignalDeferred = window.OneSignalDeferred || [];
-    OneSignalDeferred.push(async function(OneSignal) {
-      try {
-        await OneSignal.init({
-          appId: ONESIGNAL_APP_ID,
-          serviceWorkerParam: { scope: "/spare-alert/" },
-          serviceWorkerPath: "spare-alert/sw.js",
-          notifyButton: { enable: false }
-        });
-        oneSignalReady = true;
-
-        const isPermitted = OneSignal.Notifications.permission;
-        updateNotiButtonState(isPermitted);
-
-        if (isPermitted && currentUser) {
-          bindUserTagsToOneSignal(currentUser);
-        }
-
-        OneSignal.Notifications.addEventListener("permissionChange", function(permission) {
-          updateNotiButtonState(permission);
-          if (permission && currentUser) {
-            bindUserTagsToOneSignal(currentUser);
-          }
-        });
-      } catch (err) {
-        oneSignalInitError = err.message || String(err);
-        console.error("OneSignal Init Error:", err);
-      }
-    });
-
-    function updateNotiButtonState(isGranted) {
-      const btn = document.getElementById('btnEnableNoti');
-      if (!btn) return;
-      if (isGranted) {
-        btn.classList.add('enabled');
-        btn.innerText = '🔔 แจ้งเตือนเปิดอยู่';
-      } else {
-        btn.classList.remove('enabled');
-        btn.innerText = '🔔 เปิดแจ้งเตือนมือถือ';
-      }
+    if (!inputUser || !inputPass) {
+      return { success: false, message: 'กรุณากรอก Username และ Password' };
     }
 
-    async function requestPushPermission() {
-      const btn = document.getElementById('btnEnableNoti');
-      btn.innerText = '⏳ กำลังเชื่อมต่อ...';
-
-      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
-      const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
-      if (isIOS && !isStandalone) {
-        updateNotiButtonState(false);
-        alert('สำหรับ iPhone/iPad: กรุณากดปุ่ม "แชร์ (Share)" ด้านล่าง แล้วเลือก "เพิ่มไปยังหน้าจอโฮม (Add to Home Screen)" ก่อน จากนั้นเปิดแอปจากหน้าจอหลักเพื่อกดเปิดแจ้งเตือนครับ');
-        return;
-      }
-
-      if (oneSignalInitError) {
-        updateNotiButtonState(false);
-        alert('ไม่สามารถเชื่อมต่อระบบแจ้งเตือนได้: ' + oneSignalInitError);
-        return;
-      }
-
-      if (!window.OneSignal || !oneSignalReady) {
-        updateNotiButtonState(false);
-        alert('ระบบแจ้งเตือนกำลังโหลดหรือถูกบล็อก (เช่น AdBlock / เบราว์เซอร์ในแอป LINE) กรุณารอสักครู่แล้วกดใหม่อีกครั้ง หรือเปิดผ่าน Chrome / Safari โดยตรง');
-        return;
-      }
-
-      try {
-        await window.OneSignal.Notifications.requestPermission();
-        await window.OneSignal.User.PushSubscription.optIn();
-        const ok = window.OneSignal.Notifications.permission;
-        updateNotiButtonState(ok);
-        if (ok) {
-          if (currentUser) bindUserTagsToOneSignal(currentUser);
-          alert('✅ ลงทะเบียนรับแจ้งเตือนกับ OneSignal สำเร็จแล้ว!');
-        } else {
-          alert('⚠️ การแจ้งเตือนถูกบล็อกอยู่ กรุณาไปที่การตั้งค่าเบราว์เซอร์ (รูปแม่กุญแจข้างแถบ URL) แล้วกดอนุญาตการแจ้งเตือน (Notifications -> Allow)');
-        }
-      } catch (err) {
-        updateNotiButtonState(false);
-        alert('ไม่สามารถเปิดแจ้งเตือนได้: ' + err.message);
-      }
-    }
-
-      const isPermitted = OneSignal.Notifications.permission;
-      updateNotiButtonState(isPermitted);
-
-      if (isPermitted && currentUser) {
-        bindUserTagsToOneSignal(currentUser);
-      }
-
-      OneSignal.Notifications.addEventListener("permissionChange", function(permission) {
-        updateNotiButtonState(permission);
-        if (permission && currentUser) {
-          bindUserTagsToOneSignal(currentUser);
-        }
-      });
-    });
-
-    function updateNotiButtonState(isGranted) {
-      const btn = document.getElementById('btnEnableNoti');
-      if (!btn) return;
-      if (isGranted) {
-        btn.classList.add('enabled');
-        btn.innerText = '🔔 แจ้งเตือนเปิดอยู่';
-      } else {
-        btn.classList.remove('enabled');
-        btn.innerText = '🔔 เปิดแจ้งเตือนมือถือ';
-      }
-    }
-
-    function requestPushPermission() {
-      const btn = document.getElementById('btnEnableNoti');
-      btn.innerText = '⏳ กำลังเชื่อมต่อ...';
-
-      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
-      const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
-      if (isIOS && !isStandalone) {
-        updateNotiButtonState(false);
-        alert('สำหรับ iPhone/iPad: กรุณากดปุ่ม "แชร์ (Share)" ด้านล่าง แล้วเลือก "เพิ่มไปยังหน้าจอโฮม (Add to Home Screen)" ก่อน จากนั้นเปิดแอปจากหน้าจอหลักเพื่อกดเปิดแจ้งเตือนครับ');
-        return;
-      }
-
-      OneSignalDeferred.push(async function(OneSignal) {
-        try {
-          await OneSignal.Notifications.requestPermission();
-          await OneSignal.User.PushSubscription.optIn();
-          const ok = OneSignal.Notifications.permission;
-          updateNotiButtonState(ok);
-          if (ok) {
-            if (currentUser) bindUserTagsToOneSignal(currentUser);
-            alert('✅ ลงทะเบียนรับแจ้งเตือนกับ OneSignal สำเร็จแล้ว!');
-          } else {
-            alert('⚠️ การแจ้งเตือนถูกบล็อกอยู่ กรุณาไปที่การตั้งค่าเบราว์เซอร์ (รูปแม่กุญแจข้างแถบ URL) แล้วกดอนุญาตการแจ้งเตือน (Notifications -> Allow)');
-          }
-        } catch (err) {
-          updateNotiButtonState(false);
-          alert('ไม่สามารถเปิดแจ้งเตือนได้: ' + err.message);
-        }
-      });
-    }
-
-    function bindUserTagsToOneSignal(user) {
-      OneSignalDeferred.push(async function(OneSignal) {
-        try {
-          const isMeAdmin = canRunAllocation() ? "true" : "false";
-          const deptsStr = (user.allowedDepts || []).join(',');
-          await OneSignal.User.addTags({
-            username: user.username,
-            is_me_admin: isMeAdmin,
-            depts: deptsStr,
-            shift: user.allowedShift || 'ALL'
-          });
-        } catch (e) {
-          console.log("Tag sync:", e);
-        }
-      });
-    }
-
-    if ('clearAppBadge' in navigator) {
-      navigator.clearAppBadge().catch(() => {});
-    }
-
-    const DEFAULT_DEPTS = [
-      "PC-INJ", "H/C", "Bodon", "EXT-INJ", "EXT-ALU", 
-      "Painting", "BMC-INJ", "BMC-ALU", "ME - PARTS"
-    ];
-
-    const LEAVE_REASONS = [
-      "1. ลาป่วย", "2. ลาพักร้อน", "3. ลากิจ",
-      "4. ลาคลอด", "5. ลาบวช", "6. อื่นๆ", "7. ขาด"
-    ];
-
-    let currentUser = null;
-    let currentPage = 'A';
-    let currentHistorySubTab = 'DAILY';
-    let currentShiftView = 'SEPARATE';
-    let selectedDepartment = 'PC-INJ';
-    let appState = {
-      allDepartments: DEFAULT_DEPTS,
-      deptPositions: {},
-      spareList: [],
-      submittedMap: {},
-      currentAllocations: []
-    };
-
-    function getReasonOptionsHtml(selectedReason) {
-      return LEAVE_REASONS.map(r => {
-        const sel = (selectedReason === r) ? 'selected' : '';
-        return `<option value="${r}" ${sel}>${r}</option>`;
-      }).join('');
-    }
-
-    function getTodayStr() {
-      const today = new Date();
-      const yyyy = today.getFullYear();
-      const mm = String(today.getMonth() + 1).padStart(2, '0');
-      const dd = String(today.getDate()).padStart(2, '0');
-      return `${yyyy}-${mm}-${dd}`;
-    }
-
-    function canRunAllocation() {
-      if (!currentUser) return false;
-      const role = (currentUser.role || '').toUpperCase().trim();
-      const line = (currentUser.line || '').toUpperCase().trim();
-      const uname = (currentUser.username || '').toUpperCase().trim();
-
-      if (role === 'ALL' || role === 'ADMIN' || uname === 'ADMIN') return true;
-      if (role === 'ME' || role === 'ME - PARTS' || line === 'ME' || line === 'ME - PARTS' || line === 'ALL') return true;
-      if (currentUser.allowedDepts && currentUser.allowedDepts.includes('ME - PARTS')) return true;
-
-      return false;
-    }
-
-    function buildSpareDropdownHtml(spareList, shift, currentSpare, rowIndex, typeCellId, dept, dateStr) {
-      const shiftSpares = (spareList || []).filter(s => s.shift === shift).map(s => s.name);
-      let optionsHtml = `<option value="⚠️ ไม่มี Spare ว่าง/ตรง Skill" ${currentSpare === '⚠️ ไม่มี Spare ว่าง/ตรง Skill' ? 'selected' : ''}>⚠️ ไม่มี Spare ว่าง/ตรง Skill</option>`;
+    for (let i = 1; i < data.length; i++) {
+      const dbUser = (data[i][0] || '').toString().trim().toLowerCase();
+      const dbPass = (data[i][1] || '').toString().trim();
       
-      if (currentSpare && currentSpare !== '⚠️ ไม่มี Spare ว่าง/ตรง Skill' && !shiftSpares.includes(currentSpare)) {
-        optionsHtml += `<option value="${currentSpare}" selected>${currentSpare}</option>`;
-      }
+      if (!dbUser) continue;
 
-      shiftSpares.forEach(name => {
-        const sel = (name === currentSpare) ? 'selected' : '';
-        optionsHtml += `<option value="${name}" ${sel}>${name}</option>`;
-      });
+      if (dbUser === inputUser && dbPass === inputPass) {
+        const fullName = (data[i][2] || '').toString().trim() || data[i][0].toString().trim();
+        const role = (data[i][3] || '').toString().trim();
+        const lineStr = (data[i][4] || role || 'ALL').toString().trim();
+        const allowedShift = (data[i][5] || 'ALL').toString().trim().toUpperCase();
 
-      return `<select class="spare-swap-select" onchange="handleSwapSpare(this, ${rowIndex}, '${typeCellId}', '${dept}', '${shift}')" title="เปลี่ยนตัวพนักงาน Spare ทดแทน">${optionsHtml}</select>`;
-    }
-
-    async function handleSwapSpare(selectEl, rowIndex, typeCellId, dept, shift) {
-      const newSpareName = selectEl.value;
-      const editorName = currentUser ? `${currentUser.fullName} (${currentUser.username})` : 'ME/Admin';
-      selectEl.disabled = true;
-
-      try {
-        const res = await callGasApi({
-          action: 'updateAllocatedSpare',
-          rowIndex: rowIndex,
-          newSpareName: newSpareName,
-          editorName: editorName,
-          dept: dept,
-          shift: shift
-        });
-        selectEl.disabled = false;
-        if (res && res.success) {
-          if (typeCellId && document.getElementById(typeCellId)) {
-            document.getElementById(typeCellId).innerText = res.newType;
-          }
+        let allowedDepts = [];
+        if (lineStr.toUpperCase() === 'ALL') {
+          allowedDepts = [...ALL_DEPARTMENTS];
         } else {
-          alert(res ? res.message : 'เปลี่ยนชื่อพนักงานไม่สำเร็จ');
+          allowedDepts = lineStr.split(',').map(item => {
+            let d = item.trim();
+            if (d.toUpperCase() === 'ME') return 'ME - PARTS';
+            return d;
+          }).filter(Boolean);
         }
-      } catch (err) {
-        selectEl.disabled = false;
-        alert('เปลี่ยนชื่อพนักงานไม่สำเร็จ: ' + err.message);
+
+        return {
+          success: true,
+          username: data[i][0].toString().trim(),
+          fullName: fullName,
+          role: role,
+          line: lineStr,
+          allowedShift: allowedShift,
+          allowedDepts: allowedDepts
+        };
       }
     }
 
-    window.onload = function() {
-      const todayStr = getTodayStr();
-      document.getElementById('date').value = todayStr;
-      document.getElementById('histDate').value = todayStr;
-      document.getElementById('repDate').value = todayStr;
-      document.getElementById('repMonth').value = todayStr.substring(0, 7);
-
-      const savedSession = localStorage.getItem('spareAppUser');
-      if (savedSession) {
-        currentUser = JSON.parse(savedSession);
-        initMainAppAfterLogin();
-      }
+    return {
+      success: false,
+      message: 'ชื่อผู้ใช้งาน (Username) หรือรหัสผ่าน (Password) ไม่ถูกต้อง'
     };
+  } catch (e) {
+    return {
+      success: false,
+      message: 'เกิดข้อผิดพลาดในระบบ: ' + e.message
+    };
+  }
+}
 
-    function openChangePassModal() {
-      if (!currentUser) return;
-      document.getElementById('modalUsernameText').innerText = `${currentUser.fullName} (${currentUser.username})`;
-      document.getElementById('oldPassInput').value = '';
-      document.getElementById('newPassInput').value = '';
-      document.getElementById('confirmPassInput').value = '';
-      document.getElementById('changePassMsg').style.display = 'none';
-      document.getElementById('changePassModal').style.display = 'flex';
+// เปลี่ยนรหัสผ่านของผู้ใช้งานในแท็บ "User"
+function changeUserPassword(username, oldPassword, newPassword) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const userSheet = ss.getSheetByName('User') || ss.getSheetByName('Users');
+    
+    if (!userSheet) {
+      return { success: false, message: 'ไม่พบแท็บชื่อ "User" ใน Google Sheets' };
     }
 
-    function closeChangePassModal() {
-      document.getElementById('changePassModal').style.display = 'none';
+    const data = userSheet.getDataRange().getDisplayValues();
+    const inputUser = (username || '').toString().trim().toLowerCase();
+    const inputOldPass = (oldPassword || '').toString().trim();
+    const inputNewPass = (newPassword || '').toString().trim();
+
+    if (!inputOldPass || !inputNewPass) {
+      return { success: false, message: 'กรุณากรอกรหัสผ่านเดิมและรหัสผ่านใหม่ให้ครบถ้วน' };
     }
 
-    async function submitChangePassword() {
-      const oldP = document.getElementById('oldPassInput').value.trim();
-      const newP = document.getElementById('newPassInput').value.trim();
-      const confP = document.getElementById('confirmPassInput').value.trim();
-      const msgBox = document.getElementById('changePassMsg');
-      const btn = document.getElementById('btnConfirmChangePass');
-
-      msgBox.style.display = 'none';
-      if (!oldP || !newP || !confP) {
-        msgBox.style.display = 'block';
-        msgBox.innerText = 'กรุณากรอกข้อมูลให้ครบทุกช่อง';
-        return;
-      }
-      if (newP !== confP) {
-        msgBox.style.display = 'block';
-        msgBox.innerText = 'รหัสผ่านใหม่และการยืนยันรหัสผ่านไม่ตรงกัน';
-        return;
-      }
-      if (newP.length < 4) {
-        msgBox.style.display = 'block';
-        msgBox.innerText = 'รหัสผ่านใหม่ต้องมีความยาวอย่างน้อย 4 ตัวอักษร';
-        return;
-      }
-
-      btn.disabled = true;
-      btn.innerText = 'กำลังบันทึก...';
-
-      try {
-        const res = await callGasApi({
-          action: 'changeUserPassword',
-          username: currentUser.username,
-          oldPassword: oldP,
-          newPassword: newP
-        });
-        btn.disabled = false;
-        btn.innerText = 'บันทึกรหัสผ่านใหม่';
-        if (res && res.success) {
-          closeChangePassModal();
-          alert(res.message);
-        } else {
-          msgBox.style.display = 'block';
-          msgBox.innerText = res ? res.message : 'เปลี่ยนรหัสผ่านไม่สำเร็จ';
-        }
-      } catch (err) {
-        btn.disabled = false;
-        btn.innerText = 'บันทึกรหัสผ่านใหม่';
-        msgBox.style.display = 'block';
-        msgBox.innerText = 'เกิดข้อผิดพลาด: ' + err.message;
-      }
+    if (inputNewPass.length < 4) {
+      return { success: false, message: 'รหัสผ่านใหม่ต้องมีความยาวอย่างน้อย 4 ตัวอักษร' };
     }
 
-    async function handleLogin() {
-      const u = document.getElementById('loginUser').value.trim();
-      const p = document.getElementById('loginPass').value.trim();
-      const errBox = document.getElementById('loginError');
-      const btn = document.getElementById('btnLogin');
+    for (let i = 1; i < data.length; i++) {
+      const dbUser = (data[i][0] || '').toString().trim().toLowerCase();
+      const dbPass = (data[i][1] || '').toString().trim();
+      
+      if (!dbUser) continue;
 
-      if (!u || !p) {
-        errBox.style.display = 'block';
-        errBox.innerText = 'กรุณากรอก Username และ Password ให้ครบถ้วน';
-        return;
-      }
-
-      errBox.style.display = 'none';
-      btn.disabled = true;
-      btn.innerText = 'กำลังตรวจสอบข้อมูล...';
-
-      try {
-        const res = await callGasApi({
-          action: 'verifyUserLogin',
-          username: u,
-          password: p
-        });
-        btn.disabled = false;
-        btn.innerText = 'เข้าสู่ระบบ';
-
-        if (res && res.success) {
-          currentUser = res;
-          localStorage.setItem('spareAppUser', JSON.stringify(res));
-          initMainAppAfterLogin();
-        } else {
-          errBox.style.display = 'block';
-          errBox.innerText = res ? res.message : 'เข้าสู่ระบบไม่สำเร็จ';
-        }
-      } catch (err) {
-        btn.disabled = false;
-        btn.innerText = 'เข้าสู่ระบบ';
-        errBox.style.display = 'block';
-        errBox.innerText = 'เกิดข้อผิดพลาด: ' + err.message;
-      }
-    }
-
-    function initMainAppAfterLogin() {
-      document.getElementById('loginScreen').style.display = 'none';
-      document.getElementById('mainAppContainer').style.display = 'block';
-      document.getElementById('loggedUserDisplay').innerText = `${currentUser.fullName} (${currentUser.username})`;
-      document.getElementById('loggedLineDisplay').innerText = currentUser.line || 'ALL';
-      document.getElementById('loggedShiftDisplay').innerText = currentUser.allowedShift || 'ALL';
-
-      bindUserTagsToOneSignal(currentUser);
-
-      if (currentUser.allowedDepts && currentUser.allowedDepts.length > 0) {
-        selectedDepartment = currentUser.allowedDepts[0];
-      }
-
-      if (canRunAllocation()) {
-        document.getElementById('btnProcess').style.display = 'block';
-        document.getElementById('noProcessNotice').style.display = 'none';
-        document.getElementById('requesterResultBox').style.display = 'none';
-      } else {
-        document.getElementById('btnProcess').style.display = 'none';
-        document.getElementById('noProcessNotice').style.display = 'block';
-      }
-
-      const tabA = document.getElementById('tabA');
-      const tabB = document.getElementById('tabB');
-      const shiftRole = (currentUser.allowedShift || 'ALL').toUpperCase();
-
-      if (shiftRole === 'A') {
-        tabA.style.display = 'block';
-        tabB.style.display = 'none';
-        switchPage('A');
-      } else if (shiftRole === 'B') {
-        tabA.style.display = 'none';
-        tabB.style.display = 'block';
-        switchPage('B');
-      } else {
-        tabA.style.display = 'block';
-        tabB.style.display = 'block';
-        switchPage('A');
-      }
-    }
-
-    function handleLogout() {
-      localStorage.removeItem('spareAppUser');
-      currentUser = null;
-      document.getElementById('loginUser').value = '';
-      document.getElementById('loginPass').value = '';
-      document.getElementById('mainAppContainer').style.display = 'none';
-      document.getElementById('loginScreen').style.display = 'block';
-    }
-
-    function switchPage(page) {
-      currentPage = page;
-
-      document.getElementById('tabA').className = 'nav-tab' + (page === 'A' ? ' active-A' : '');
-      document.getElementById('tabB').className = 'nav-tab' + (page === 'B' ? ' active-B' : '');
-      document.getElementById('tabHistory').className = 'nav-tab' + (page === 'HISTORY' ? ' active-HISTORY' : '');
-
-      if (page === 'HISTORY') {
-        document.getElementById('shiftFormPage').style.display = 'none';
-        document.getElementById('historyPage').style.display = 'block';
-        switchHistorySubTab(currentHistorySubTab);
-      } else {
-        document.getElementById('shiftFormPage').style.display = 'block';
-        document.getElementById('historyPage').style.display = 'none';
-        document.getElementById('summaryBox').style.display = 'none';
-
-        loadShiftStatus();
-      }
-    }
-
-    function switchHistorySubTab(subTab) {
-      currentHistorySubTab = subTab;
-
-      document.getElementById('subTabDaily').className = 'sub-tab' + (subTab === 'DAILY' ? ' active-sub' : '');
-      document.getElementById('subTabMonthly').className = 'sub-tab' + (subTab === 'MONTHLY' ? ' active-sub' : '');
-      document.getElementById('subTabDetail').className = 'sub-tab' + (subTab === 'DETAIL' ? ' active-sub' : '');
-
-      if (subTab === 'DETAIL') {
-        document.getElementById('summaryReportView').style.display = 'none';
-        document.getElementById('detailHistoryView').style.display = 'block';
-        loadDetailHistory();
-      } else {
-        document.getElementById('summaryReportView').style.display = 'block';
-        document.getElementById('detailHistoryView').style.display = 'none';
-
-        document.getElementById('dailyPickerCol').style.display = (subTab === 'DAILY') ? 'block' : 'none';
-        document.getElementById('monthlyPickerCol').style.display = (subTab === 'MONTHLY') ? 'block' : 'none';
-        loadSummaryReport();
-      }
-    }
-
-    function setShiftView(viewMode) {
-      currentShiftView = viewMode;
-      document.getElementById('btnViewSeparate').className = 'view-toggle-btn' + (viewMode === 'SEPARATE' ? ' active-view' : '');
-      document.getElementById('btnViewCombined').className = 'view-toggle-btn' + (viewMode === 'COMBINED' ? ' active-view' : '');
-      loadSummaryReport();
-    }
-
-    async function loadSummaryReport() {
-      const mode = currentHistorySubTab;
-      const periodVal = (mode === 'DAILY') 
-        ? document.getElementById('repDate').value 
-        : document.getElementById('repMonth').value;
-
-      if (!periodVal) return;
-      document.getElementById('repTableBody').innerHTML = '<tr><td colspan="4" style="text-align:center;">กำลังประมวลผลสรุปข้อมูล...</td></tr>';
-
-      try {
-        const res = await callGasApi({
-          action: 'getSummaryReport',
-          mode: mode,
-          periodVal: periodVal,
-          shiftView: currentShiftView
-        });
-
-        let reasonPills = Object.keys(res.reasonTotals || {})
-          .filter(r => res.reasonTotals[r] > 0)
-          .map(r => `<span class="stat-pill" style="background:#fefcbf; color:#744210;">${r}: ${res.reasonTotals[r]}</span>`)
-          .join('');
-
-        document.getElementById('repGrandBanner').innerHTML = `
-          <div style="width:100%; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-            <span style="font-weight:bold; color:#22543d;">สรุปยอด (${mode === 'DAILY' ? 'รายวัน' : 'รายเดือน'}):</span>
-            <span class="stat-pill" style="background:#bee3f8; color:#2b6cb0;">แผนกผลิตขอทดแทน: ${res.grandTotalWorker || 0} คน</span>
-            <span class="stat-pill" style="background:#e9d8fd; color:#553c9a;">Spare หยุดงาน (ME): ${res.grandTotalMeAbsent || 0} คน</span>
-          </div>
-          ${reasonPills ? `<div style="width:100%; display:flex; gap:6px; flex-wrap:wrap; margin-top:6px; padding-top:6px; border-top:1px dashed #cbd5e0;">${reasonPills}</div>` : ''}
-        `;
-
-        const tbody = document.getElementById('repTableBody');
-        let html = (res.rows || []).map(r => {
-          const rowStyle = r.w === 0 ? 'color:#a0aec0;' : 'background:#ffffff;';
-          const reasonSummary = Object.keys(r.reasons || {})
-            .filter(k => r.reasons[k] > 0)
-            .map(k => `${k} (${r.reasons[k]})`)
-            .join(', ') || '-';
-          const deptLabel = r.isME ? `${r.dept} <span style="font-size:11px; color:#6b46c1;">(แจ้ง Spare หยุด)</span>` : r.dept;
-          const numBg = r.w > 0 ? (r.isME ? '#faf5ff' : '#ebf8ff') : '#f8fafc';
-          const numColor = r.w > 0 ? (r.isME ? '#553c9a' : '#2b6cb0') : '#a0aec0';
-
-          return `
-            <tr style="${rowStyle}">
-              <td><b style="color:${r.w > 0 ? '#1a365d' : '#a0aec0'};">${deptLabel}</b></td>
-              <td>${r.shift}</td>
-              <td class="num-col" style="font-weight:bold; background:${numBg}; color:${numColor};">${r.w}</td>
-              <td>${reasonSummary}</td>
-            </tr>
-          `;
-        }).join('');
-
-        html += `
-          <tr class="total-row">
-            <td colspan="2" style="text-align:right;">รวมยอดแผนกผลิตขอทดแทน :</td>
-            <td class="num-col" style="background:#bee3f8; color:#1a365d;">${res.grandTotalWorker || 0}</td>
-            <td>-</td>
-          </tr>
-        `;
-        tbody.innerHTML = html;
-      } catch (err) {
-        alert('โหลดรายงานสรุปไม่สำเร็จ: ' + err.message);
-      }
-    }
-
-    async function loadShiftStatus() {
-      const dateInput = document.getElementById('date');
-      if (!dateInput.value) dateInput.value = getTodayStr();
-      const dateStr = dateInput.value;
-      const shift = currentPage;
-
-      document.getElementById('progressText').innerText = 'กำลังซิงค์ข้อมูล...';
-
-      try {
-        const data = await callGasApi({
-          action: 'getFormAndStatus',
-          date: dateStr,
-          shift: shift
-        });
-        if (data) {
-          appState = data;
-          if (!appState.allDepartments || appState.allDepartments.length === 0) {
-            appState.allDepartments = DEFAULT_DEPTS;
-          }
-        }
-        renderBadges();
-        onDeptSelect(selectedDepartment);
-        renderRequesterResult();
-      } catch (err) {
-        document.getElementById('progressText').innerText = 'เชื่อมต่อผิดพลาด';
-        alert('เกิดข้อผิดพลาดในการโหลดข้อมูล: ' + err.message);
-      }
-    }
-
-    async function refreshRequesterAllocation(btnEl) {
-      const dateStr = document.getElementById('date').value;
-      const shift = currentPage;
-      const origText = btnEl.innerText;
-
-      btnEl.disabled = true;
-      btnEl.innerText = '⏳ กำลังดึงข้อมูล...';
-
-      try {
-        const data = await callGasApi({
-          action: 'getFormAndStatus',
-          date: dateStr,
-          shift: shift
-        });
-        btnEl.disabled = false;
-        btnEl.innerText = origText;
-        if (data) {
-          appState = data;
-          renderBadges();
-          renderRequesterResult();
-        }
-      } catch (err) {
-        btnEl.disabled = false;
-        btnEl.innerText = origText;
-        alert('ไม่สามารถดึงข้อมูลล่าสุดได้: ' + err.message);
-      }
-    }
-
-    function renderRequesterResult() {
-      if (canRunAllocation()) return;
-
-      const noticeEl = document.getElementById('noProcessNotice');
-      const resultBox = document.getElementById('requesterResultBox');
-      const allocs = appState.currentAllocations || [];
-      const allowedDepts = (currentUser && currentUser.allowedDepts) ? currentUser.allowedDepts : [];
-
-      const myAllocs = allocs.filter(a => allowedDepts.includes(a.dept) && a.pos !== '-');
-
-      if (myAllocs.length === 0) {
-        noticeEl.style.display = 'block';
-        resultBox.style.display = 'none';
-        return;
-      }
-
-      noticeEl.style.display = 'none';
-      resultBox.style.display = 'block';
-
-      const procTimeText = myAllocs[0].procTime ? `อัปเดตเมื่อ: ${myAllocs[0].procTime}` : '';
-
-      let rowsHtml = myAllocs.map(s => {
-        const isShortage = s.spare.includes('ไม่มี Spare');
-        const spareColor = isShortage ? '#c53030' : '#2f855a';
-        const statusTag = s.isLate ? `<span class="tag-late">ส่งล่าช้า</span>` : `<span class="tag-ontime">ส่งตรงเวลา</span>`;
-
-        return `
-          <tr>
-            <td><b>${s.dept}</b><br>${statusTag}</td>
-            <td>${s.pos} <span style="color:#4a5568; font-size:12px;">(${s.reason})</span><br><span style="font-size:11px; color:#718096;">${s.personNo}</span></td>
-            <td style="color:${spareColor}; font-weight:bold; font-size:15px;">${s.spare}</td>
-            <td>${s.type}</td>
-          </tr>
-        `;
-      }).join('');
-
-      resultBox.innerHTML = `
-        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:8px;">
-          <h4 style="margin:0; color:#1a365d;">✅ รายชื่อพนักงาน Spare ที่เข้าทดแทนในแผนกของคุณ (กะ ${currentPage})</h4>
-          <div style="display:flex; align-items:center; gap:8px;">
-            <span style="font-size:12px; color:#4a5568;">${procTimeText}</span>
-            <button onclick="refreshRequesterAllocation(this)" style="padding:4px 10px; background:#2b6cb0; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:12px; font-weight:bold;">
-              🔄 อัปเดตผล
-            </button>
-          </div>
-        </div>
-        <table>
-          <thead>
-            <tr>
-              <th>แผนก</th>
-              <th>ตำแหน่งที่ขอ (เหตุผล)</th>
-              <th>พนักงาน Spare ที่เข้าทดแทน</th>
-              <th>เงื่อนไขการจัดสรร</th>
-            </tr>
-          </thead>
-          <tbody>${rowsHtml}</tbody>
-        </table>
-      `;
-    }
-
-    function renderBadges() {
-      const container = document.getElementById('deptBadges');
-      const depts = appState.allDepartments || DEFAULT_DEPTS;
-      const submittedMap = appState.submittedMap || {};
-      const allowed = (currentUser && currentUser.allowedDepts) ? currentUser.allowedDepts : depts;
-
-      const requestDeptCount = Object.keys(submittedMap).filter(d => d !== 'ME - PARTS').length;
-      document.getElementById('progressText').innerText = `ขอคนแล้ว ${requestDeptCount} แผนก`;
-
-      container.innerHTML = depts.map(dept => {
-        const isAllowed = allowed.includes(dept);
-        const subInfo = submittedMap[dept];
-        const isDone = !!subInfo;
-        const isME = (dept === 'ME - PARTS');
-        const isLate = isDone && !isME && subInfo.isLate;
-        const isActive = (dept === selectedDepartment) ? 'badge-active' : '';
-        
-        let badgeClass = 'badge-pending';
-        let icon = '○';
-        let label = isME ? `${dept} (แจ้ง Spare หยุด)` : dept;
-
-        if (isME && isDone) {
-          badgeClass = 'badge-me';
-          icon = '📋';
-          label = `${dept} (Spare หยุด ${subInfo.workerCount} คน)`;
-        } else if (isLate) {
-          badgeClass = 'badge-late';
-          icon = '⏰';
-          label = `${dept} (${subInfo.workerCount} คน - ล่าช้า)`;
-        } else if (isDone) {
-          badgeClass = 'badge-done';
-          icon = '✓';
-          label = `${dept} (${subInfo.workerCount} คน)`;
+      if (dbUser === inputUser) {
+        if (dbPass !== inputOldPass) {
+          return { success: false, message: 'รหัสผ่านเดิมไม่ถูกต้อง' };
         }
 
-        if (!isAllowed) {
-          return `<span class="dept-badge ${badgeClass} badge-locked" title="คุณไม่มีสิทธิ์บันทึกแผนกนี้">${icon} ${label}</span>`;
-        }
+        const cell = userSheet.getRange(i + 1, 2);
+        cell.setNumberFormat("@");
+        cell.setValue(inputNewPass);
+        SpreadsheetApp.flush();
 
-        return `<span class="dept-badge ${badgeClass} ${isActive}" onclick="onDeptSelect('${dept}')">${icon} ${label}</span>`;
-      }).join('');
-
-      const btnProc = document.getElementById('btnProcess');
-      btnProc.innerText = `ประมวลผลจัดสรร Spare กะ ${currentPage} ทันที (มีคำขอ ${requestDeptCount} แผนก)`;
-    }
-
-    function unlockEditForm() {
-      document.getElementById('btnUnlockEdit').style.display = 'none';
-      document.getElementById('formInputBlock').style.display = 'block';
-    }
-
-    function onDeptSelect(dept) {
-      const allowed = (currentUser && currentUser.allowedDepts) ? currentUser.allowedDepts : DEFAULT_DEPTS;
-      if (!allowed.includes(dept)) {
-        dept = allowed[0] || 'PC-INJ';
-      }
-
-      selectedDepartment = dept;
-      const isME = (dept === 'ME - PARTS');
-      document.getElementById('currentDeptTitle').innerText = isME 
-        ? `${dept} (กะ ${currentPage}) — บันทึกรายชื่อ Spare ที่ขาด-ลา` 
-        : `${dept} (กะ ${currentPage})`;
-
-      document.getElementById('levelCardMainTitle').innerText = isME
-        ? 'แจ้งรายชื่อพนักงาน Spare ที่หยุดงาน (ไม่ขอคนทดแทน)'
-        : 'ขอพนักงาน Spare ทดแทน (ระดับ Worker)';
-      document.getElementById('levelCardSubTitle').innerText = isME
-        ? '*เพื่อกันรายชื่อออกจากการจัดสรรให้แผนกอื่น'
-        : '*บันทึกเฉพาะวันที่มีคนขาด';
-
-      const existingData = (appState.submittedMap || {})[dept];
-      const btnSave = document.getElementById('btnSave');
-      const btnCancelReq = document.getElementById('btnCancelReq');
-      const btnUnlock = document.getElementById('btnUnlockEdit');
-      const formBlock = document.getElementById('formInputBlock');
-      const editTag = document.getElementById('editTag');
-
-      renderBadges();
-
-      let savedWorkers = [];
-
-      if (existingData) {
-        editTag.style.display = 'inline-block';
-        editTag.innerText = isME
-          ? `✓ Spare หยุด ${existingData.workerCount} คน โดย: ${existingData.recordedBy}`
-          : `✓ ขอ ${existingData.workerCount} คน โดย: ${existingData.recordedBy}`;
-        
-        formBlock.style.display = 'none';
-        btnUnlock.style.display = 'block';
-        btnUnlock.innerText = isME
-          ? `✏️ แก้ไข / ล้างรายชื่อ Spare หยุด (${dept})`
-          : `✏️ แก้ไข / ยกเลิกคำขอแผนก ${dept}`;
-
-        btnSave.innerText = isME
-          ? `💾 บันทึกการแก้ไขรายชื่อ Spare หยุด`
-          : `💾 บันทึกการแก้ไขคำขอแผนก ${dept}`;
-        btnSave.classList.add('btn-saved-green');
-        
-        btnCancelReq.style.display = 'block';
-        btnCancelReq.innerText = isME
-          ? `🗑️ ล้างรายชื่อ (Spare มาครบทุกคน)`
-          : `🗑️ ยกเลิกคำขอ (ไม่มีคนขาด)`;
-        savedWorkers = existingData.workers || [];
-      } else {
-        editTag.style.display = 'none';
-        
-        formBlock.style.display = 'block';
-        btnUnlock.style.display = 'none';
-
-        btnSave.innerText = isME
-          ? `บันทึกรายชื่อ Spare ที่หยุดงาน (${dept})`
-          : `ส่งคำขอ Spare แผนก ${dept}`;
-        btnSave.classList.remove('btn-saved-green');
-        btnCancelReq.style.display = 'none';
-      }
-
-      if (isME) {
-        document.getElementById('mePartsSection').style.display = 'block';
-        document.getElementById('normalDeptSection').style.display = 'none';
-        renderSpareCheckboxes(savedWorkers);
-      } else {
-        document.getElementById('mePartsSection').style.display = 'none';
-        document.getElementById('normalDeptSection').style.display = 'block';
-        
-        if (existingData) {
-          document.getElementById('workerCount').value = existingData.workerCount || 0;
-          generatePersonRows(savedWorkers);
-        } else {
-          document.getElementById('workerCount').value = 0;
-          generatePersonRows([]);
-        }
+        return {
+          success: true,
+          message: 'เปลี่ยนรหัสผ่านเรียบร้อยแล้ว กรุณาใช้รหัสผ่านใหม่ในการเข้าสู่ระบบครั้งถัดไป'
+        };
       }
     }
 
-    function renderSpareCheckboxes(savedDetails) {
-      const shift = currentPage;
-      const container = document.getElementById('spareCheckboxContainer');
-      const filtered = (appState.spareList || []).filter(s => s.shift === shift);
+    return { success: false, message: 'ไม่พบข้อมูลผู้ใช้งานในระบบ' };
+  } catch (e) {
+    return { success: false, message: 'เกิดข้อผิดพลาด: ' + e.message };
+  }
+}
 
-      if (filtered.length === 0) {
-        container.innerHTML = `<div style="color:#c53030;">ไม่พบรายชื่อ Spare ในกะ ${shift}</div>`;
-        return;
-      }
+function getShiftScheduleByDate(dateStr) {
+  const targetStr = normalizeDate(dateStr);
+  const parts = targetStr.split('-');
+  const targetUtc = Date.UTC(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+  const anchorUtc = Date.UTC(2026, 10, 16);
 
-      let savedMap = {};
-      savedDetails.forEach(item => {
-        if (typeof item === 'string') {
-          savedMap[item] = '1. ลาป่วย';
-        } else if (item && item.name) {
-          savedMap[item.name] = item.reason || '1. ลาป่วย';
-        }
-      });
+  const msPerDay = 24 * 60 * 60 * 1000;
+  const diffDays = Math.floor((targetUtc - anchorUtc) / msPerDay);
+  const cycleIndex = Math.floor(diffDays / 14);
+  const isEvenCycle = (((cycleIndex % 2) + 2) % 2) === 0;
 
-      container.innerHTML = filtered.map((s, idx) => {
-        const isChecked = !!savedMap[s.name];
-        const checkedAttr = isChecked ? 'checked' : '';
-        const displayStyle = isChecked ? 'inline-block' : 'none';
-        const reasonOpts = getReasonOptionsHtml(savedMap[s.name] || '1. ลาป่วย');
+  if (isEvenCycle) {
+    return { A: 'กะดึก', B: 'กะเช้า', dayShiftTeam: 'B', nightShiftTeam: 'A' };
+  } else {
+    return { A: 'กะเช้า', B: 'กะดึก', dayShiftTeam: 'A', nightShiftTeam: 'B' };
+  }
+}
 
-        return `
-          <div class="spare-check-item">
-            <div class="spare-left">
-              <input type="checkbox" id="sp_${idx}" value="${s.name}" class="spare-cb" ${checkedAttr} 
-                     onchange="document.getElementById('sp_reason_${idx}').style.display = this.checked ? 'inline-block' : 'none'">
-              <label for="sp_${idx}" style="margin:0; font-weight:normal; cursor:pointer;">${s.name} (กะ ${s.shift})</label>
-            </div>
-            <select id="sp_reason_${idx}" class="spare-reason-select" style="display:${displayStyle};">
-              ${reasonOpts}
-            </select>
-          </div>
-        `;
-      }).join('');
-    }
+function autoProcessCutoff() {
+  const now = new Date();
+  const todayStr = Utilities.formatDate(now, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  const hour = Number(Utilities.formatDate(now, Session.getScriptTimeZone(), 'H'));
+  const schedule = getShiftScheduleByDate(todayStr);
 
-    function generatePersonRows(savedDetails = []) {
-      const dept = selectedDepartment;
-      const count = parseInt(document.getElementById('workerCount').value) || 0;
-      const container = document.getElementById('peoplePositionsContainer');
-      const positions = (appState.deptPositions || {})[dept] || [];
+  if (hour < 15) {
+    runFullAllocation(todayStr, schedule.dayShiftTeam, true);
+  } else {
+    runFullAllocation(todayStr, schedule.nightShiftTeam, true);
+  }
+}
 
-      container.innerHTML = '';
-      if (count <= 0) return;
+function getFormAndStatus(dateStr, shift) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const skillSheet = ss.getSheetByName('Spare') || ss.getSheetByName('Spare_Skills') || ss.getSheets()[0];
+  const subSheet = getOrCreateSheet(ss, 'Daily_Submission', [
+    'วันที่', 'กะ (A/B)', 'แผนก', 'สถานะขาดลา', 
+    'Worker (คน)', 'Leadman (คน)', 'Technician (คน)', 'Leader (คน)', 'รวมขาด-ลา (คน)',
+    'รายละเอียด (JSON)', 'เวลาที่อัปเดตล่าสุด', 'ผู้บันทึกข้อมูล'
+  ]);
+  const sumSheet = ss.getSheetByName('Allocation_Summary');
 
-      for (let i = 1; i <= count; i++) {
-        const savedItem = savedDetails[i - 1];
-        const optionsHtml = positions.map(p => {
-          const isSelected = (savedItem && Number(savedItem.colIndex) === Number(p.colIndex)) ? 'selected' : '';
-          return `<option value="${p.colIndex}" ${isSelected}>${p.position}</option>`;
-        }).join('');
+  const targetDate = normalizeDate(dateStr);
+  const shiftSchedule = getShiftScheduleByDate(targetDate);
+  const targetShift = shift ? shift.toString().trim() : 'A';
+  const actualShiftTime = shiftSchedule[targetShift];
 
-        const reasonOptionsHtml = getReasonOptionsHtml(savedItem ? savedItem.reason : '1. ลาป่วย');
+  const deptPositions = {
+    "PC-INJ": [{ position: "QC", colIndex: 4 }],
+    "H/C": [
+      { position: "Air blow", colIndex: 5 },
+      { position: "Wiping", colIndex: 6 },
+      { position: "Air blow2", colIndex: 7 },
+      { position: "Paint", colIndex: 8 }
+    ],
+    "Bodon": [
+      { position: "Paint", colIndex: 9 },
+      { position: "Keep", colIndex: 10 },
+      { position: "QC", colIndex: 11 }
+    ],
+    "EXT-INJ": [{ position: "QC", colIndex: 12 }],
+    "EXT-ALU": [
+      { position: "Air blow", colIndex: 13 },
+      { position: "Paint U/C", colIndex: 14 },
+      { position: "Alu", colIndex: 15 },
+      { position: "QC", colIndex: 16 }
+    ],
+    "Painting": [
+      { position: "Air Blow", colIndex: 17 },
+      { position: "Paint", colIndex: 18 },
+      { position: "QC", colIndex: 19 }
+    ],
+    "BMC-INJ": [{ position: "QC", colIndex: 20 }],
+    "BMC-ALU": [
+      { position: "Washing", colIndex: 21 },
+      { position: "Paint U/C", colIndex: 22 },
+      { position: "Alu", colIndex: 23 },
+      { position: "QC", colIndex: 24 }
+    ],
+    "ME - PARTS": []
+  };
 
-        const div = document.createElement('div');
-        div.className = 'person-box';
-        div.innerHTML = `
-          <span class="person-label">คนที่ ${i} :</span>
-          <select class="person-pos-select" title="เลือกตำแหน่งงาน">${optionsHtml}</select>
-          <select class="person-reason-select" title="เลือกเหตุผลการหยุดงาน">${reasonOptionsHtml}</select>
-        `;
-        container.appendChild(div);
-      }
-    }
+  let spareList = [];
+  if (skillSheet && skillSheet.getLastRow() >= 4) {
+    const empData = skillSheet.getRange(4, 1, skillSheet.getLastRow() - 3, 2).getValues();
+    spareList = empData
+      .filter(r => r[0] && r[0].toString().trim() !== '')
+      .map(r => ({ 
+        name: r[0].toString().trim(), 
+        shift: r[1] ? r[1].toString().trim() : 'A' 
+      }));
+  }
 
-    async function saveCurrentDept() {
-      const dept = selectedDepartment;
-      const shift = currentPage;
-      const isME = (dept === 'ME - PARTS');
+  const subData = subSheet.getDataRange().getValues();
+  let submittedMap = {};
+  
+  for (let i = 1; i < subData.length; i++) {
+    if (!subData[i][0]) continue;
+    const rowDate = normalizeDate(subData[i][0]);
+    const rowShift = subData[i][1].toString().trim();
+    const rowDept = subData[i][2].toString().trim();
+    const wCount = Number(subData[i][4]) || 0;
+    
+    if (rowDate === targetDate && rowShift === targetShift && wCount > 0) {
+      const updatedStr = subData[i][10] ? subData[i][10].toString().replace(/^'/, '') : '';
+      const isLate = checkIsLateSubmission(targetDate, updatedStr, actualShiftTime);
+      const parsedJson = subData[i][9] ? JSON.parse(subData[i][9]) : {};
+      const workersArr = Array.isArray(parsedJson) ? parsedJson : (parsedJson.workers || []);
 
-      let payload = {
-        date: document.getElementById('date').value,
-        shift: shift,
-        department: dept,
-        cancelRequest: false,
-        workerCount: 0,
-        recordedBy: currentUser ? `${currentUser.fullName} (${currentUser.username})` : 'Unknown',
-        workers: []
+      submittedMap[rowDept] = {
+        rowIndex: i + 1,
+        workerCount: wCount,
+        workers: workersArr,
+        updatedAt: updatedStr,
+        recordedBy: subData[i][11] ? subData[i][11].toString() : '-',
+        isLate: isLate
       };
+    }
+  }
 
-      if (isME) {
-        const checkboxes = document.querySelectorAll('.spare-cb');
-        let selectedSpares = [];
-        checkboxes.forEach((cb, idx) => {
-          if (cb.checked) {
-            const reasonVal = document.getElementById(`sp_reason_${idx}`).value;
-            selectedSpares.push({ name: cb.value, reason: reasonVal });
-          }
+  let currentAllocations = [];
+  if (sumSheet && sumSheet.getLastRow() > 1) {
+    const sumData = sumSheet.getDataRange().getValues();
+    for (let i = 1; i < sumData.length; i++) {
+      if (!sumData[i][0]) continue;
+      const sDate = normalizeDate(sumData[i][0]);
+      const sShift = sumData[i][1].toString().trim();
+      if (sDate === targetDate && sShift === targetShift) {
+        const timeStat = sumData[i][9] ? sumData[i][9].toString() : '-';
+        let rawProc = sumData[i][10];
+        let procTimeStr = '';
+        if (rawProc instanceof Date) {
+          procTimeStr = Utilities.formatDate(rawProc, Session.getScriptTimeZone(), 'dd/MM/yyyy HH:mm');
+        } else if (rawProc) {
+          procTimeStr = rawProc.toString();
+        }
+
+        currentAllocations.push({
+          dept: sumData[i][3] ? sumData[i][3].toString().trim() : '-',
+          pos: sumData[i][4] ? sumData[i][4].toString().trim() : '-',
+          reason: sumData[i][5] ? sumData[i][5].toString().trim() : '-',
+          personNo: sumData[i][6] ? sumData[i][6].toString().trim() : '-',
+          spare: sumData[i][7] ? sumData[i][7].toString().trim() : '-',
+          type: sumData[i][8] ? sumData[i][8].toString().trim() : '-',
+          timeStatus: timeStat,
+          isLate: timeStat.indexOf('ล่าช้า') !== -1,
+          procTime: procTimeStr
         });
-        payload.workers = selectedSpares;
-        payload.workerCount = selectedSpares.length;
+      }
+    }
+  }
+
+  return {
+    allDepartments: ALL_DEPARTMENTS,
+    deptPositions: deptPositions,
+    spareList: spareList,
+    submittedMap: submittedMap,
+    shiftSchedule: shiftSchedule,
+    activeShift: targetShift,
+    currentAllocations: currentAllocations
+  };
+}
+
+function saveDepartmentData(payload) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const subSheet = getOrCreateSheet(ss, 'Daily_Submission', [
+    'วันที่', 'กะ (A/B)', 'แผนก', 'สถานะขาดลา', 
+    'Worker (คน)', 'Leadman (คน)', 'Technician (คน)', 'Leader (คน)', 'รวมขาด-ลา (คน)',
+    'รายละเอียด (JSON)', 'เวลาที่อัปเดตล่าสุด', 'ผู้บันทึกข้อมูล'
+  ]);
+
+  const subData = subSheet.getDataRange().getValues();
+  let existingRow = -1;
+  const targetDate = normalizeDate(payload.date);
+  const targetShift = payload.shift.toString().trim();
+
+  for (let i = 1; i < subData.length; i++) {
+    if (!subData[i][0]) continue;
+    const rowDate = normalizeDate(subData[i][0]);
+    const rowShift = subData[i][1].toString().trim();
+    const rowDept = subData[i][2].toString().trim();
+    
+    if (rowDate === targetDate && rowShift === targetShift && rowDept === payload.department) {
+      existingRow = i + 1;
+      break;
+    }
+  }
+
+  const wCount = payload.cancelRequest ? 0 : (Number(payload.workerCount) || 0);
+
+  if (payload.cancelRequest || wCount === 0) {
+    if (existingRow !== -1) {
+      subSheet.deleteRow(existingRow);
+    }
+    if (payload.department !== 'ME - PARTS') {
+      const sumSheet = ss.getSheetByName('Allocation_Summary');
+      if (sumSheet && sumSheet.getLastRow() > 1) {
+        const sumData = sumSheet.getDataRange().getValues();
+        for (let i = sumData.length - 1; i >= 1; i--) {
+          if (!sumData[i][0]) continue;
+          if (normalizeDate(sumData[i][0]) === targetDate && 
+              sumData[i][1].toString().trim() === targetShift && 
+              sumData[i][3].toString().trim() === payload.department) {
+            sumSheet.deleteRow(i + 1);
+          }
+        }
+      }
+    }
+    return getFormAndStatus(targetDate, targetShift);
+  }
+
+  const statusLabel = (payload.department === 'ME - PARTS') ? 'แจ้ง Spare หยุดงาน' : 'ขอคนทดแทน (Request)';
+  const jsonDetails = JSON.stringify({ workers: payload.workers || [] });
+  const timestamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+  const recordedBy = payload.recordedBy || 'Unknown';
+
+  const rowValues = [
+    "'" + targetDate,
+    targetShift,
+    payload.department,
+    statusLabel,
+    wCount,
+    0,
+    0,
+    0,
+    wCount,
+    jsonDetails,
+    "'" + timestamp,
+    recordedBy
+  ];
+
+  if (existingRow !== -1) {
+    subSheet.getRange(existingRow, 1, 1, rowValues.length).setValues([rowValues]);
+  } else {
+    subSheet.appendRow(rowValues);
+  }
+
+  if (payload.department !== 'ME - PARTS') {
+    sendOneSignalPush(
+      `📋 คำขอ Spare ใหม่ (${payload.department})`,
+      `แผนก ${payload.department} (กะ ${targetShift}) ขอพนักงานทดแทน ${wCount} คน`,
+      [{ field: "tag", key: "is_me_admin", relation: "=", value: "true" }]
+    );
+  }
+
+  return getFormAndStatus(targetDate, targetShift);
+}
+
+function updateAllocatedSpare(rowIndex, newSpareName, editorName, dept, shift) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sumSheet = ss.getSheetByName('Allocation_Summary');
+    if (!sumSheet || rowIndex < 2 || rowIndex > sumSheet.getLastRow()) {
+      return { success: false, message: 'ไม่พบรายการที่ต้องการแก้ไขในตารางสรุป' };
+    }
+
+    const procTime = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'dd/MM/yyyy HH:mm:ss');
+    const noteText = `✎ ปรับเปลี่ยนโดย ${editorName || 'ME/Admin'}`;
+
+    sumSheet.getRange(rowIndex, 8).setValue(newSpareName);
+    sumSheet.getRange(rowIndex, 9).setValue(noteText);
+    sumSheet.getRange(rowIndex, 11).setValue(procTime);
+    SpreadsheetApp.flush();
+
+    return {
+      success: true,
+      newSpare: newSpareName,
+      newType: noteText
+    };
+  } catch (e) {
+    return { success: false, message: 'เกิดข้อผิดพลาดในการเปลี่ยนตัวพนักงาน: ' + e.message };
+  }
+}
+
+function getHistoryData(filterDate, filterShift, filterDept) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const skillSheet = ss.getSheetByName('Spare') || ss.getSheetByName('Spare_Skills') || ss.getSheets()[0];
+  const subSheet = ss.getSheetByName('Daily_Submission');
+  const sumSheet = ss.getSheetByName('Allocation_Summary');
+
+  const targetDate = filterDate ? normalizeDate(filterDate) : '';
+  const targetShift = filterShift || 'ALL';
+  const targetDept = filterDept || 'ALL';
+
+  let spareList = [];
+  if (skillSheet && skillSheet.getLastRow() >= 4) {
+    const empData = skillSheet.getRange(4, 1, skillSheet.getLastRow() - 3, 2).getValues();
+    spareList = empData
+      .filter(r => r[0] && r[0].toString().trim() !== '')
+      .map(r => ({ 
+        name: r[0].toString().trim(), 
+        shift: r[1] ? r[1].toString().trim() : 'A' 
+      }));
+  }
+
+  let submissionLogs = [];
+  let totalWorker = 0;
+
+  if (subSheet && subSheet.getLastRow() > 1) {
+    const subData = subSheet.getDataRange().getValues();
+    for (let i = 1; i < subData.length; i++) {
+      if (!subData[i][0]) continue;
+      const rDate = normalizeDate(subData[i][0]);
+      const rShift = subData[i][1].toString().trim();
+      const rDept = subData[i][2].toString().trim();
+      const w = Number(subData[i][4]) || 0;
+
+      if (w === 0) continue;
+      if (targetDate && rDate !== targetDate) continue;
+      if (targetShift !== 'ALL' && rShift !== targetShift) continue;
+      if (targetDept !== 'ALL' && rDept !== targetDept) continue;
+
+      const schedule = getShiftScheduleByDate(rDate);
+      const actualTime = schedule[rShift] || '-';
+      const parsedJson = subData[i][9] ? JSON.parse(subData[i][9]) : {};
+      const updatedAt = subData[i][10] ? subData[i][10].toString().replace(/^'/, '') : '-';
+      const recordedBy = subData[i][11] ? subData[i][11].toString() : '-';
+      const isLate = checkIsLateSubmission(rDate, updatedAt, actualTime);
+
+      if (rDept !== 'ME - PARTS') {
+        totalWorker += w;
+      }
+
+      const workersArr = Array.isArray(parsedJson) ? parsedJson : (parsedJson.workers || []);
+      let detailText = '-';
+      if (workersArr.length > 0) {
+        if (rDept === 'ME - PARTS') {
+          detailText = workersArr.map(d => typeof d === 'string' ? d : `${d.name} (${d.reason || '-'})`).join(', ');
+        } else {
+          detailText = workersArr.map(d => `${d.positionName} [${d.reason || '-'}]`).join(', ');
+        }
+      }
+
+      submissionLogs.push({
+        date: rDate,
+        shift: rShift,
+        actualTime: actualTime,
+        dept: rDept,
+        w: w,
+        detailText: detailText,
+        updatedAt: updatedAt,
+        recordedBy: recordedBy,
+        isLate: isLate
+      });
+    }
+  }
+
+  submissionLogs.sort((a, b) => b.date.localeCompare(a.date) || a.shift.localeCompare(b.shift));
+
+  let allocationLogs = [];
+  if (sumSheet && sumSheet.getLastRow() > 1) {
+    const sumData = sumSheet.getDataRange().getValues();
+    for (let i = 1; i < sumData.length; i++) {
+      if (!sumData[i][0]) continue;
+      const sDate = normalizeDate(sumData[i][0]);
+      const sShift = sumData[i][1].toString().trim();
+      const sDept = sumData[i][3].toString().trim();
+
+      if (targetDate && sDate !== targetDate) continue;
+      if (targetShift !== 'ALL' && sShift !== targetShift) continue;
+      if (targetDept !== 'ALL' && sDept !== targetDept && sDept !== 'ทุกแผนก') continue;
+
+      allocationLogs.push({
+        rowIndex: i + 1,
+        date: sDate,
+        shift: sShift,
+        actualTime: sumData[i][2] ? sumData[i][2].toString() : '-',
+        dept: sDept,
+        pos: sumData[i][4] ? sumData[i][4].toString() : '-',
+        reason: sumData[i][5] ? sumData[i][5].toString() : '-',
+        personNo: sumData[i][6] ? sumData[i][6].toString() : '-',
+        spare: sumData[i][7] ? sumData[i][7].toString() : '-',
+        type: sumData[i][8] ? sumData[i][8].toString() : '-',
+        timeStatus: sumData[i][9] ? sumData[i][9].toString() : '-'
+      });
+    }
+  }
+
+  allocationLogs.sort((a, b) => b.date.localeCompare(a.date) || a.shift.localeCompare(b.shift));
+
+  return {
+    submissionLogs: submissionLogs,
+    allocationLogs: allocationLogs,
+    totalWorker: totalWorker,
+    spareList: spareList
+  };
+}
+
+function getSummaryReport(mode, periodVal, shiftView) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const subSheet = ss.getSheetByName('Daily_Submission');
+
+  let groupedMap = {};
+  let grandTotalRequest = 0;
+  let grandTotalMeAbsent = 0;
+  let reasonTotals = {
+    "1. ลาป่วย": 0, "2. ลาพักร้อน": 0, "3. ลากิจ": 0,
+    "4. ลาคลอด": 0, "5. ลาบวช": 0, "6. อื่นๆ": 0, "7. ขาด": 0
+  };
+
+  ALL_DEPARTMENTS.forEach(dept => {
+    if (shiftView === 'SEPARATE') {
+      ['A', 'B'].forEach(sh => {
+        const key = `${dept}_${sh}`;
+        groupedMap[key] = {
+          dept: dept,
+          shift: `กะ ${sh}`,
+          w: 0,
+          isME: (dept === 'ME - PARTS'),
+          reasons: { "1. ลาป่วย": 0, "2. ลาพักร้อน": 0, "3. ลากิจ": 0, "4. ลาคลอด": 0, "5. ลาบวช": 0, "6. อื่นๆ": 0, "7. ขาด": 0 }
+        };
+      });
+    } else {
+      const key = `${dept}_ALL`;
+      groupedMap[key] = {
+        dept: dept,
+        shift: 'รวมกะ (A+B)',
+        w: 0,
+        isME: (dept === 'ME - PARTS'),
+        reasons: { "1. ลาป่วย": 0, "2. ลาพักร้อน": 0, "3. ลากิจ": 0, "4. ลาคลอด": 0, "5. ลาบวช": 0, "6. อื่นๆ": 0, "7. ขาด": 0 }
+      };
+    }
+  });
+
+  if (subSheet && subSheet.getLastRow() > 1) {
+    const subData = subSheet.getDataRange().getValues();
+    for (let i = 1; i < subData.length; i++) {
+      if (!subData[i][0]) continue;
+      const rDate = normalizeDate(subData[i][0]);
+      const rShift = subData[i][1].toString().trim();
+      const rDept = subData[i][2].toString().trim();
+
+      if (mode === 'DAILY' && rDate !== periodVal) continue;
+      if (mode === 'MONTHLY' && !rDate.startsWith(periodVal)) continue;
+
+      const w = Number(subData[i][4]) || 0;
+      if (w === 0) continue;
+
+      const parsedJson = subData[i][9] ? JSON.parse(subData[i][9]) : {};
+      const key = (shiftView === 'SEPARATE') ? `${rDept}_${rShift}` : `${rDept}_ALL`;
+      if (!groupedMap[key]) continue;
+
+      groupedMap[key].w += w;
+      if (rDept === 'ME - PARTS') {
+        grandTotalMeAbsent += w;
       } else {
-        const personBoxes = document.querySelectorAll('.person-box');
-        payload.workers = Array.from(personBoxes).map((box, idx) => {
-          const posSel = box.querySelector('.person-pos-select');
-          const reasonSel = box.querySelector('.person-reason-select');
-          return {
-            personNo: idx + 1,
-            colIndex: posSel.value,
-            positionName: posSel.options[posSel.selectedIndex].text,
-            reason: reasonSel.value
-          };
-        });
-        payload.workerCount = payload.workers.length;
+        grandTotalRequest += w;
       }
 
-      if (payload.workerCount === 0) {
-        alert(isME 
-          ? 'กรุณาติ๊กเลือกรายชื่อพนักงาน Spare ที่หยุดงานอย่างน้อย 1 คน' 
-          : 'กรุณาระบุจำนวน Worker ที่ขาดอย่างน้อย 1 คน (ระบบนี้บันทึกเฉพาะวันที่มีคนขาด)');
-        return;
-      }
-
-      const btn = document.getElementById('btnSave');
-      btn.disabled = true;
-      btn.innerText = 'กำลังบันทึก...';
-
-      try {
-        const updatedData = await callGasApi({
-          action: 'saveDepartmentData',
-          payload: payload
-        });
-        btn.disabled = false;
-        appState = updatedData;
-        renderBadges();
-        onDeptSelect(dept);
-        renderRequesterResult();
-        alert(isME 
-          ? `บันทึกรายชื่อ Spare ที่หยุดงาน (${shift}) จำนวน ${payload.workerCount} คน เรียบร้อยแล้ว`
-          : `ส่งคำขอ Spare แผนก ${dept} (กะ ${shift}) จำนวน ${payload.workerCount} คน เรียบร้อยแล้ว`);
-      } catch (err) {
-        btn.disabled = false;
-        btn.innerText = isME ? `บันทึกรายชื่อ Spare ที่หยุดงาน (${dept})` : `ส่งคำขอ Spare แผนก ${dept}`;
-        alert('บันทึกไม่สำเร็จ: ' + err.message);
-      }
+      const workersArr = Array.isArray(parsedJson) ? parsedJson : (parsedJson.workers || []);
+      workersArr.forEach(item => {
+        const rName = (typeof item === 'object' && item.reason) ? item.reason : null;
+        if (rName && groupedMap[key].reasons.hasOwnProperty(rName)) {
+          groupedMap[key].reasons[rName] += 1;
+          reasonTotals[rName] += 1;
+        }
+      });
     }
+  }
 
-    async function cancelCurrentDeptRequest() {
-      const dept = selectedDepartment;
-      const shift = currentPage;
-      const isME = (dept === 'ME - PARTS');
-      const msg = isME
-        ? `ยืนยันการล้างรายชื่อ Spare ที่หยุดงานของกะ ${shift} (Spare มาครบทุกคน) ใช่หรือไม่?`
-        : `ยืนยันการยกเลิกคำขอ Spare ของแผนก ${dept} (กะ ${shift}) ใช่หรือไม่?`;
-
-      if (!confirm(msg)) return;
-
-      const btn = document.getElementById('btnCancelReq');
-      btn.disabled = true;
-      btn.innerText = 'กำลังดำเนินการ...';
-
-      try {
-        const updatedData = await callGasApi({
-          action: 'saveDepartmentData',
-          payload: {
-            date: document.getElementById('date').value,
-            shift: shift,
-            department: dept,
-            cancelRequest: true
-          }
-        });
-        btn.disabled = false;
-        appState = updatedData;
-        renderBadges();
-        onDeptSelect(dept);
-        renderRequesterResult();
-        alert(isME ? 'ล้างรายชื่อ Spare ที่หยุดงานเรียบร้อยแล้ว' : `ยกเลิกคำขอแผนก ${dept} เรียบร้อยแล้ว`);
-      } catch (err) {
-        btn.disabled = false;
-        alert('ดำเนินการไม่สำเร็จ: ' + err.message);
-      }
+  let rows = [];
+  ALL_DEPARTMENTS.forEach(dept => {
+    if (shiftView === 'SEPARATE') {
+      rows.push(groupedMap[`${dept}_A`]);
+      rows.push(groupedMap[`${dept}_B`]);
+    } else {
+      rows.push(groupedMap[`${dept}_ALL`]);
     }
+  });
 
-    async function processAllAllocations() {
-      if (!canRunAllocation()) {
-        alert('คุณไม่มีสิทธิ์กดประมวลผลจัดสรร Spare (สงวนสิทธิ์เฉพาะแผนก ME และ Admin)');
-        return;
+  return {
+    rows: rows,
+    grandTotalWorker: grandTotalRequest,
+    grandTotalMeAbsent: grandTotalMeAbsent,
+    reasonTotals: reasonTotals
+  };
+}
+
+function runFullAllocation(dateStr, shift, isAutoTrigger) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const skillSheet = ss.getSheetByName('Spare') || ss.getSheetByName('Spare_Skills') || ss.getSheets()[0];
+  const subSheet = ss.getSheetByName('Daily_Submission');
+  if (!subSheet) return { success: false, message: 'ไม่พบข้อมูล Daily_Submission' };
+
+  const summarySheet = getOrCreateSheet(ss, 'Allocation_Summary', [
+    'วันที่', 'กะ (A/B)', 'ช่วงกะจริง', 'แผนกที่ขอ', 'ตำแหน่งที่ขาด (Worker)', 'เหตุผลการหยุดงาน', 'ลำดับคนที่ขาด', 
+    'พนักงาน Spare ที่ได้รับจัดสรร', 'ประเภทการจัดสรร', 'สถานะเวลาส่ง', 'เวลาประมวลผล'
+  ]);
+
+  const allSkillData = skillSheet.getDataRange().getValues();
+  const subData = subSheet.getDataRange().getValues();
+  const targetDate = normalizeDate(dateStr);
+  const targetShift = shift.toString().trim();
+  const schedule = getShiftScheduleByDate(targetDate);
+  const actualShiftTime = schedule[targetShift];
+
+  let deptRecords = {};
+  let totalRequestedWorkers = 0;
+
+  for (let i = 1; i < subData.length; i++) {
+    if (!subData[i][0]) continue;
+    const rowDate = normalizeDate(subData[i][0]);
+    const rowShift = subData[i][1].toString().trim();
+    const w = Number(subData[i][4]) || 0;
+
+    if (rowDate === targetDate && rowShift === targetShift && w > 0) {
+      const dept = subData[i][2].toString().trim();
+      const updatedStr = subData[i][10] ? subData[i][10].toString().replace(/^'/, '') : '';
+      const parsedJson = subData[i][9] ? JSON.parse(subData[i][9]) : {};
+      const workersArr = Array.isArray(parsedJson) ? parsedJson : (parsedJson.workers || []);
+
+      if (dept !== 'ME - PARTS') {
+        totalRequestedWorkers += w;
       }
+      deptRecords[dept] = {
+        workers: workersArr,
+        updatedAt: updatedStr
+      };
+    }
+  }
 
-      const dateStr = document.getElementById('date').value;
-      const shift = currentPage;
-      const btn = document.getElementById('btnProcess');
+  if (isAutoTrigger && Object.keys(deptRecords).length === 0) {
+    return { success: true, message: 'No request submitted yet' };
+  }
+
+  let unavailableSpares = new Set();
+  if (deptRecords['ME - PARTS']) {
+    const meWorkers = deptRecords['ME - PARTS'].workers;
+    if (Array.isArray(meWorkers)) {
+      meWorkers.forEach(item => {
+        const spName = (typeof item === 'string') ? item : item.name;
+        if (spName) unavailableSpares.add(spName.trim());
+      });
+    }
+  }
+
+  const sumData = summarySheet.getDataRange().getValues();
+  for (let i = sumData.length - 1; i >= 1; i--) {
+    if (!sumData[i][0]) continue;
+    const sDate = normalizeDate(sumData[i][0]);
+    const sShift = sumData[i][1].toString().trim();
+    if (sDate === targetDate && sShift === targetShift) {
+      summarySheet.deleteRow(i + 1);
+    }
+  }
+
+  let onTimeRequests = [];
+  let lateRequests = [];
+
+  ALL_DEPARTMENTS.forEach(dept => {
+    if (dept === 'ME - PARTS') return;
+    const rec = deptRecords[dept];
+    if (rec && rec.workers.length > 0) {
+      const isLate = checkIsLateSubmission(targetDate, rec.updatedAt, actualShiftTime);
+      rec.workers.forEach(item => {
+        const reqObj = {
+          department: dept,
+          personNo: item.personNo,
+          positionName: item.positionName,
+          reason: item.reason || '-',
+          colIndex: Number(item.colIndex),
+          updatedAt: rec.updatedAt,
+          isLate: isLate
+        };
+        if (isLate) {
+          lateRequests.push(reqObj);
+        } else {
+          onTimeRequests.push(reqObj);
+        }
+      });
+    }
+  });
+
+  lateRequests.sort((a, b) => a.updatedAt.localeCompare(b.updatedAt));
+
+  const onTimeAllocations = allocateBatch(onTimeRequests, allSkillData, targetShift, unavailableSpares);
+  const lateAllocations = allocateBatch(lateRequests, allSkillData, targetShift, unavailableSpares);
+
+  const allRequests = [...onTimeRequests, ...lateRequests];
+  const allAllocations = [...onTimeAllocations, ...lateAllocations];
+
+  const procTime = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'dd/MM/yyyy HH:mm:ss');
+  const startRow = summarySheet.getLastRow() + 1;
+  let outputRows = [];
+  let displaySummary = [];
+
+  if (allRequests.length === 0) {
+    outputRows.push(["'" + targetDate, targetShift, actualShiftTime, 'ทุกแผนก', '-', '-', '-', 'ไม่มีคำขอ Spare ทดแทน', 'ปกติ', '-', procTime]);
+    displaySummary.push({ rowIndex: startRow, dept: 'ทุกแผนก', pos: '-', reason: '-', personNo: '-', spare: 'ไม่มีคำขอ Spare ทดแทน', type: 'ปกติ', timeStatus: '-' });
+  } else {
+    allRequests.forEach((req, idx) => {
+      const alloc = allAllocations[idx];
+      const timeBadge = req.isLate ? 'ส่งล่าช้า (จัดสรรจากคนเหลือ)' : 'ส่งตรงเวลา (สิทธิ์หลัก)';
+      outputRows.push([
+        "'" + targetDate,
+        targetShift,
+        actualShiftTime,
+        req.department,
+        req.positionName,
+        req.reason,
+        `คนที่ ${req.personNo}`,
+        alloc.spareName,
+        alloc.type,
+        timeBadge,
+        procTime
+      ]);
+      displaySummary.push({
+        rowIndex: startRow + idx,
+        dept: req.department,
+        pos: req.positionName,
+        reason: req.reason,
+        personNo: req.personNo,
+        spare: alloc.spareName,
+        type: alloc.type,
+        timeStatus: timeBadge,
+        isLate: req.isLate
+      });
+    });
+  }
+
+  summarySheet.getRange(startRow, 1, outputRows.length, outputRows[0].length).setValues(outputRows);
+
+  return {
+    success: true,
+    date: targetDate,
+    shift: targetShift,
+    actualShiftTime: actualShiftTime,
+    totalWorker: totalRequestedWorkers,
+    summary: displaySummary
+  };
+}
+
+function checkIsLateSubmission(targetDateStr, updatedAtStr, actualShiftTime) {
+  if (!updatedAtStr) return false;
+  const parts = updatedAtStr.split(' ');
+  if (parts.length < 2) return false;
+  
+  const subDate = parts[0];
+  const timeParts = parts[1].split(':');
+  const hour = Number(timeParts[0]);
+  const minute = Number(timeParts[1]);
+  const totalMinutes = (hour * 60) + minute;
+
+  if (subDate < targetDateStr) return false;
+  if (subDate > targetDateStr) return true;
+
+  if (actualShiftTime === 'กะเช้า') {
+    return totalMinutes > (8 * 60 + 30);
+  } else {
+    return totalMinutes > (20 * 60 + 30);
+  }
+}
+
+function allocateBatch(requests, allSkillData, targetShift, unavailableSpares) {
+  let allocations = new Array(requests.length).fill(null);
+  let deptsWithShortage = new Set(requests.map(r => r.department));
+
+  for (let i = 0; i < requests.length; i++) {
+    const req = requests[i];
+    const primaryCandidate = findSpareCandidate(allSkillData, targetShift, req.department, req.colIndex, unavailableSpares, true, deptsWithShortage);
+    if (primaryCandidate) {
+      unavailableSpares.add(primaryCandidate.name);
+      allocations[i] = {
+        spareName: primaryCandidate.name,
+        type: `★ ลงแผนกหลัก (${req.department})`
+      };
+    }
+  }
+
+  for (let i = 0; i < requests.length; i++) {
+    if (allocations[i] !== null) continue;
+    const req = requests[i];
+    const backupCandidate = findSpareCandidate(allSkillData, targetShift, req.department, req.colIndex, unavailableSpares, false, deptsWithShortage);
+    if (backupCandidate) {
+      unavailableSpares.add(backupCandidate.name);
+      allocations[i] = {
+        spareName: backupCandidate.name,
+        type: `➔ จัดสรรข้ามแผนก (หลัก: ${backupCandidate.mainDepts})`
+      };
+    } else {
+      allocations[i] = {
+        spareName: '⚠️ ไม่มี Spare ว่าง/ตรง Skill',
+        type: 'ขาดคนทดแทน'
+      };
+    }
+  }
+
+  return allocations;
+}
+
+function findSpareCandidate(allSkillData, shift, targetDept, targetCol, unavailableSpares, requirePrimaryDept, deptsWithShortage) {
+  let candidates = [];
+
+  for (let r = 3; r < allSkillData.length; r++) {
+    const sName = allSkillData[r][0] ? allSkillData[r][0].toString().trim() : '';
+    const sShift = allSkillData[r][1] ? allSkillData[r][1].toString().trim() : '';
+    const mainDept1 = allSkillData[r][2] ? allSkillData[r][2].toString().trim() : '';
+    const mainDept2 = allSkillData[r][3] ? allSkillData[r][3].toString().trim() : '';
+    const mark = allSkillData[r][targetCol] ? allSkillData[r][targetCol].toString().trim().toLowerCase() : '';
+
+    if (sName && sShift === shift && !unavailableSpares.has(sName) && (mark === 'o' || mark === '0')) {
+      const isPrimary = (mainDept1 === targetDept || mainDept2 === targetDept);
       
-      btn.disabled = true;
-      btn.innerText = 'กำลังประมวลผลจัดสรรคน...';
-
-      try {
-        const res = await callGasApi({
-          action: 'runFullAllocation',
-          date: dateStr,
-          shift: shift
+      if (requirePrimaryDept && isPrimary) {
+        return { name: sName, mainDepts: [mainDept1, mainDept2].filter(Boolean).join('/') };
+      }
+      
+      if (!requirePrimaryDept) {
+        const ownDeptNeedsHelp = deptsWithShortage.has(mainDept1) || deptsWithShortage.has(mainDept2);
+        candidates.push({
+          name: sName,
+          mainDepts: [mainDept1, mainDept2].filter(Boolean).join('/'),
+          priority: ownDeptNeedsHelp ? 2 : 1
         });
-        btn.disabled = false;
-
-        if (!res || !res.success || !res.summary) {
-          renderBadges();
-          alert('ประมวลผลไม่สำเร็จ: ' + (res && res.message ? res.message : 'ยังไม่ได้ Deploy เวอร์ชันใหม่ใน Google Apps Script'));
-          return;
-        }
-
-        loadShiftStatus();
-        
-        const box = document.getElementById('summaryBox');
-        box.style.display = 'block';
-        
-        let rowsHtml = res.summary.map((s, idx) => {
-          const statusTag = s.isLate 
-            ? `<span class="tag-late">ส่งล่าช้า</span>` 
-            : `<span class="tag-ontime">ส่งตรงเวลา</span>`;
-          const posAndReason = s.pos !== '-' ? `${s.pos} <span style="color:#4a5568; font-size:12px;">(${s.reason})</span>` : '-';
-          const typeCellId = `proc_type_${idx}`;
-          const spareCellHtml = (s.pos !== '-') 
-            ? buildSpareDropdownHtml(appState.spareList, res.shift, s.spare, s.rowIndex, typeCellId, s.dept, res.date)
-            : `<span style="color:#2b6cb0; font-weight:bold;">${s.spare}</span>`;
-
-          return `
-            <tr>
-              <td><b>${s.dept}</b><br>${s.pos !== '-' ? statusTag : ''}</td>
-              <td>${posAndReason} ${s.personNo !== '-' ? `<br><span style="font-size:11px; color:#718096;">คนที่ ${s.personNo}</span>` : ''}</td>
-              <td>${spareCellHtml}</td>
-              <td id="${typeCellId}">${s.type}</td>
-            </tr>
-          `;
-        }).join('');
-
-        box.innerHTML = `
-          <h4 style="margin:0 0 8px 0; color:#22543d;">สรุปคำขอและผลการจัดสรร Spare (กะ ${res.shift}) — สามารถเลือกเปลี่ยนชื่อพนักงานได้ทันที</h4>
-          <div><b>วันที่:</b> ${res.date} | <b>ทีม:</b> กะ ${res.shift} (<b>${res.actualShiftTime}</b>)</div>
-          <div class="stat-banner">
-            <span class="stat-pill" style="background:#bee3f8; color:#2b6cb0;">รวมขอทดแทน Worker: ${res.totalWorker} คน</span>
-          </div>
-          <table>
-            <thead>
-              <tr>
-                <th>แผนก / เวลาส่ง</th>
-                <th>ตำแหน่ง (เหตุผลการหยุด)</th>
-                <th>Spare ที่ได้รับจัดสรร (เปลี่ยนตัวได้)</th>
-                <th>เงื่อนไขการจัดสรร</th>
-              </tr>
-            </thead>
-            <tbody>${rowsHtml}</tbody>
-          </table>
-        `;
-      } catch (err) {
-        btn.disabled = false;
-        renderBadges();
-        alert('ประมวลผลไม่สำเร็จ: ' + err.message);
       }
     }
+  }
 
-    function clearDateFilter() {
-      document.getElementById('histDate').value = '';
-      loadDetailHistory();
-    }
+  if (candidates.length > 0) {
+    candidates.sort((a, b) => a.priority - b.priority);
+    return candidates[0];
+  }
+  return null;
+}
 
-    async function loadDetailHistory() {
-      const fDate = document.getElementById('histDate').value;
-      const fShift = document.getElementById('histShift').value;
-      const fDept = document.getElementById('histDept').value;
+function sendOneSignalPush(title, message, filters) {
+  if (!ONESIGNAL_REST_API_KEY) return;
+  try {
+    const payload = {
+      app_id: ONESIGNAL_APP_ID,
+      headings: { en: title, th: title },
+      contents: { en: message, th: message },
+      filters: filters
+    };
+    UrlFetchApp.fetch("https://onesignal.com/api/v1/notifications", {
+      method: "post",
+      contentType: "application/json; charset=utf-8",
+      headers: { Authorization: "Basic " + ONESIGNAL_REST_API_KEY },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+  } catch (e) {
+    Logger.log("Push error: " + e.message);
+  }
+}
 
-      document.getElementById('histSubBody').innerHTML = '<tr><td colspan="6" style="text-align:center;">กำลังโหลดข้อมูล...</td></tr>';
-      document.getElementById('histAllocBody').innerHTML = '<tr><td colspan="7" style="text-align:center;">กำลังโหลดข้อมูล...</td></tr>';
-
-      try {
-        const res = await callGasApi({
-          action: 'getHistoryData',
-          filterDate: fDate,
-          filterShift: fShift,
-          filterDept: fDept
-        });
-
-        document.getElementById('histStatsBanner').innerHTML = `
-          <span style="font-weight:bold; color:#22543d; align-self:center;">ยอดรวมตามตัวกรอง:</span>
-          <span class="stat-pill" style="background:#bee3f8; color:#2b6cb0;">Worker: ${res.totalWorker || 0} คน</span>
-        `;
-
-        const subBody = document.getElementById('histSubBody');
-        if (!res.submissionLogs || res.submissionLogs.length === 0) {
-          subBody.innerHTML = '<tr><td colspan="6" style="text-align:center; color:#718096;">ไม่พบประวัติข้อมูลตามเงื่อนไขที่เลือก</td></tr>';
-        } else {
-          subBody.innerHTML = res.submissionLogs.map(r => {
-            const isME = (r.dept === 'ME - PARTS');
-            const statusTag = isME 
-              ? '<span class="tag-me">แจ้ง Spare หยุด</span>' 
-              : (r.isLate ? '<span class="tag-late">ล่าช้า</span>' : '<span class="tag-ontime">ตรงเวลา</span>');
-            return `
-              <tr>
-                <td>${r.date}</td>
-                <td><b>กะ ${r.shift}</b><br><span style="font-size:11px;">(${r.actualTime})</span></td>
-                <td><b>${r.dept}</b></td>
-                <td class="num-col"><b>${r.w}</b></td>
-                <td>${r.detailText}</td>
-                <td><span style="color:#2b6cb0; font-weight:bold;">${r.recordedBy}</span><br><span style="font-size:11px;">${r.updatedAt}</span><br>${statusTag}</td>
-              </tr>
-            `;
-          }).join('');
-        }
-
-        const allocBody = document.getElementById('histAllocBody');
-        const canEditSpare = canRunAllocation();
-        const spareList = res.spareList || appState.spareList || [];
-
-        if (!res.allocationLogs || res.allocationLogs.length === 0) {
-          allocBody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:#718096;">ยังไม่มีประวัติการประมวลผลจัดสรร Spare ตามเงื่อนไขที่เลือก</td></tr>';
-        } else {
-          allocBody.innerHTML = res.allocationLogs.map((a, idx) => {
-            const typeCellId = `hist_type_${idx}`;
-            const spareDisplay = (canEditSpare && a.pos !== '-')
-              ? buildSpareDropdownHtml(spareList, a.shift, a.spare, a.rowIndex, typeCellId, a.dept, a.date)
-              : `<span style="color:#2b6cb0; font-weight:bold;">${a.spare}</span>`;
-
-            return `
-              <tr>
-                <td>${a.date}</td>
-                <td><b>กะ ${a.shift}</b> (${a.actualTime})</td>
-                <td><b>${a.dept}</b></td>
-                <td>${a.pos} <span style="color:#4a5568; font-size:12px;">(${a.reason})</span><br><span style="font-size:11px; color:#718096;">${a.personNo}</span></td>
-                <td>${spareDisplay}</td>
-                <td id="${typeCellId}">${a.type}</td>
-                <td>${a.timeStatus}</td>
-              </tr>
-            `;
-          }).join('');
-        }
-      } catch (err) {
-        alert('โหลดประวัติไม่สำเร็จ: ' + err.message);
-      }
-    }
-  </script>
-</body>
-</html>
+function getOrCreateSheet(ss, name, headers) {
+  let sheet = ss.getSheetByName(name);
+  if (!sheet) {
+    sheet = ss.insertSheet(name);
+    sheet.appendRow(headers);
+    sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold').setBackground('#e2e8f0');
+  }
+  return sheet;
+}
