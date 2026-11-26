@@ -393,14 +393,91 @@
     // =========================================================================
     // ระบบแจ้งเตือน OneSignal Web SDK v16 (ตั้งค่าสำหรับ GitHub Pages /spare-alert/)
     // =========================================================================
+    let oneSignalReady = false;
+    let oneSignalInitError = null;
+
     window.OneSignalDeferred = window.OneSignalDeferred || [];
     OneSignalDeferred.push(async function(OneSignal) {
-      await OneSignal.init({
-        appId: ONESIGNAL_APP_ID,
-        serviceWorkerParam: { scope: "/spare-alert/" },
-        serviceWorkerPath: "./sw.js",
-        notifyButton: { enable: false }
-      });
+      try {
+        await OneSignal.init({
+          appId: ONESIGNAL_APP_ID,
+          serviceWorkerParam: { scope: "/spare-alert/" },
+          serviceWorkerPath: "spare-alert/sw.js",
+          notifyButton: { enable: false }
+        });
+        oneSignalReady = true;
+
+        const isPermitted = OneSignal.Notifications.permission;
+        updateNotiButtonState(isPermitted);
+
+        if (isPermitted && currentUser) {
+          bindUserTagsToOneSignal(currentUser);
+        }
+
+        OneSignal.Notifications.addEventListener("permissionChange", function(permission) {
+          updateNotiButtonState(permission);
+          if (permission && currentUser) {
+            bindUserTagsToOneSignal(currentUser);
+          }
+        });
+      } catch (err) {
+        oneSignalInitError = err.message || String(err);
+        console.error("OneSignal Init Error:", err);
+      }
+    });
+
+    function updateNotiButtonState(isGranted) {
+      const btn = document.getElementById('btnEnableNoti');
+      if (!btn) return;
+      if (isGranted) {
+        btn.classList.add('enabled');
+        btn.innerText = '🔔 แจ้งเตือนเปิดอยู่';
+      } else {
+        btn.classList.remove('enabled');
+        btn.innerText = '🔔 เปิดแจ้งเตือนมือถือ';
+      }
+    }
+
+    async function requestPushPermission() {
+      const btn = document.getElementById('btnEnableNoti');
+      btn.innerText = '⏳ กำลังเชื่อมต่อ...';
+
+      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+      const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
+      if (isIOS && !isStandalone) {
+        updateNotiButtonState(false);
+        alert('สำหรับ iPhone/iPad: กรุณากดปุ่ม "แชร์ (Share)" ด้านล่าง แล้วเลือก "เพิ่มไปยังหน้าจอโฮม (Add to Home Screen)" ก่อน จากนั้นเปิดแอปจากหน้าจอหลักเพื่อกดเปิดแจ้งเตือนครับ');
+        return;
+      }
+
+      if (oneSignalInitError) {
+        updateNotiButtonState(false);
+        alert('ไม่สามารถเชื่อมต่อระบบแจ้งเตือนได้: ' + oneSignalInitError);
+        return;
+      }
+
+      if (!window.OneSignal || !oneSignalReady) {
+        updateNotiButtonState(false);
+        alert('ระบบแจ้งเตือนกำลังโหลดหรือถูกบล็อก (เช่น AdBlock / เบราว์เซอร์ในแอป LINE) กรุณารอสักครู่แล้วกดใหม่อีกครั้ง หรือเปิดผ่าน Chrome / Safari โดยตรง');
+        return;
+      }
+
+      try {
+        await window.OneSignal.Notifications.requestPermission();
+        await window.OneSignal.User.PushSubscription.optIn();
+        const ok = window.OneSignal.Notifications.permission;
+        updateNotiButtonState(ok);
+        if (ok) {
+          if (currentUser) bindUserTagsToOneSignal(currentUser);
+          alert('✅ ลงทะเบียนรับแจ้งเตือนกับ OneSignal สำเร็จแล้ว!');
+        } else {
+          alert('⚠️ การแจ้งเตือนถูกบล็อกอยู่ กรุณาไปที่การตั้งค่าเบราว์เซอร์ (รูปแม่กุญแจข้างแถบ URL) แล้วกดอนุญาตการแจ้งเตือน (Notifications -> Allow)');
+        }
+      } catch (err) {
+        updateNotiButtonState(false);
+        alert('ไม่สามารถเปิดแจ้งเตือนได้: ' + err.message);
+      }
+    }
 
       const isPermitted = OneSignal.Notifications.permission;
       updateNotiButtonState(isPermitted);
