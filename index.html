@@ -390,7 +390,9 @@
       return await response.json();
     }
 
-    // เริ่มต้นระบบแจ้งเตือน OneSignal
+    // =========================================================================
+    // ระบบแจ้งเตือน OneSignal Web SDK v16 (ตั้งค่าสำหรับ GitHub Pages /spare-alert/)
+    // =========================================================================
     window.OneSignalDeferred = window.OneSignalDeferred || [];
     OneSignalDeferred.push(async function(OneSignal) {
       await OneSignal.init({
@@ -456,77 +458,6 @@
           alert('ไม่สามารถเปิดแจ้งเตือนได้: ' + err.message);
         }
       });
-    }
-
-    function bindUserTagsToOneSignal(user) {
-      OneSignalDeferred.push(async function(OneSignal) {
-        try {
-          const isMeAdmin = canRunAllocation() ? "true" : "false";
-          const deptsStr = (user.allowedDepts || []).join(',');
-          await OneSignal.User.addTags({
-            username: user.username,
-            is_me_admin: isMeAdmin,
-            depts: deptsStr,
-            shift: user.allowedShift || 'ALL'
-          });
-        } catch (e) {
-          console.log("Tag sync:", e);
-        }
-      });
-    }
-
-    function updateNotiButtonState(isGranted) {
-      const btn = document.getElementById('btnEnableNoti');
-      if (!btn) return;
-      if (isGranted) {
-        btn.classList.add('enabled');
-        btn.innerText = '🔔 แจ้งเตือนเปิดอยู่';
-      } else {
-        btn.classList.remove('enabled');
-        btn.innerText = '🔔 เปิดแจ้งเตือนมือถือ';
-      }
-    }
-
-    async function requestPushPermission() {
-      const btn = document.getElementById('btnEnableNoti');
-      btn.innerText = '⏳ กำลังขอสิทธิ์...';
-
-      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
-      const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
-      if (isIOS && !isStandalone) {
-        updateNotiButtonState(false);
-        alert('สำหรับ iPhone/iPad: กรุณากดปุ่ม "แชร์ (Share)" ด้านล่าง แล้วเลือก "เพิ่มไปยังหน้าจอโฮม (Add to Home Screen)" ก่อน จากนั้นเปิดแอปจากหน้าจอหลักเพื่อกดเปิดแจ้งเตือนครับ');
-        return;
-      }
-
-      try {
-        if ("Notification" in window) {
-          const perm = await Notification.requestPermission();
-          if (perm === "granted") {
-            updateNotiButtonState(true);
-            OneSignalDeferred.push(async function(OneSignal) {
-              await OneSignal.User.PushSubscription.optIn();
-              if (currentUser) bindUserTagsToOneSignal(currentUser);
-            });
-            alert('✅ เปิดรับการแจ้งเตือนเรียบร้อยแล้ว!');
-            return;
-          } else if (perm === "denied") {
-            updateNotiButtonState(false);
-            alert('⚠️ การแจ้งเตือนถูกบล็อกอยู่ กรุณาไปที่การตั้งค่าเบราว์เซอร์ (รูปแม่กุญแจข้างแถบ URL) แล้วกดอนุญาตการแจ้งเตือน (Notifications -> Allow)');
-            return;
-          }
-        }
-
-        OneSignalDeferred.push(async function(OneSignal) {
-          await OneSignal.Notifications.requestPermission();
-          const ok = OneSignal.Notifications.permission;
-          updateNotiButtonState(ok);
-          if (ok && currentUser) bindUserTagsToOneSignal(currentUser);
-        });
-      } catch (err) {
-        updateNotiButtonState(false);
-        alert('ไม่สามารถเปิดแจ้งเตือนได้: ' + err.message);
-      }
     }
 
     function bindUserTagsToOneSignal(user) {
