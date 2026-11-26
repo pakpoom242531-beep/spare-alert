@@ -396,13 +396,10 @@
     let oneSignalReady = false;
     let oneSignalInitError = null;
 
-    window.OneSignalDeferred = window.OneSignalDeferred || [];
-    OneSignalDeferred.push(async function(OneSignal) {
-      try {
-        await OneSignal.init({
+    await OneSignal.init({
           appId: ONESIGNAL_APP_ID,
           serviceWorkerParam: { scope: "/spare-alert/" },
-          serviceWorkerPath: "spare-alert/sw.js",
+          serviceWorkerPath: "/spare-alert/sw.js",
           notifyButton: { enable: false }
         });
         oneSignalReady = true;
